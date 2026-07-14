@@ -223,6 +223,11 @@ python3 cone_detector.py --camera 1
 The mask is always displayed beside the camera; no extra option is needed.
 To make the combined window narrower, use `--display-width 1200`.
 
+The detector has a second close-range shape path for cones whose base or side
+is partly outside the image. It keeps the stricter tapered-shape requirements
+for small distant objects, while allowing a large cone low in the image to
+remain outlined as the robot approaches it.
+
 If distant cones are ignored, reduce the minimum area, for example:
 
 ```bash

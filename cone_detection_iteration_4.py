@@ -111,6 +111,8 @@ class CameraMotionSlalomNavigator:
         # bottom, and generally closer to the forward center of the image.
         candidates: list[Detection] = []
         for detection in detections:
+            if detection.cropped:
+                continue
             distance = calibration.estimate_distance_cm(detection, frame_shape)
             bottom_ratio = (detection.y + detection.height) / frame_shape[0]
             if distance >= self.pass_distance_cm * 1.35 and bottom_ratio < 0.86:
@@ -171,6 +173,10 @@ class CameraMotionSlalomNavigator:
             return self.feedback(calibrated=True, frame_shape=frame_shape)
 
         raw_distance = calibration.estimate_distance_cm(target, frame_shape)
+        if target.cropped:
+            # Pixel height underestimates the full cone after frame clipping.
+            # Treat it as conservatively close instead of delaying the turn.
+            raw_distance = min(raw_distance, self.hard_turn_cm)
         self.raw_distance_cm = raw_distance
         center_x_ratio = target.center[0] / frame_shape[1]
         bottom_ratio = (target.y + target.height) / frame_shape[0]
@@ -372,6 +378,9 @@ def main() -> None:
             if key == ord("c"):
                 if not all_detections:
                     print("Calibration failed: no cone is detected.")
+                    continue
+                if all_detections[0].cropped:
+                    print("Calibration failed: keep the full cone inside the image.")
                     continue
                 calibration = CameraCalibration.from_observation(
                     all_detections[0],

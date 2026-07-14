@@ -211,7 +211,7 @@ def calibrate_from_multiple_frames(
             break
         frame_shape = frame.shape
         detections = detect_cones(frame, min_area=args.min_area)
-        if len(detections) == 1:
+        if len(detections) == 1 and not detections[0].cropped:
             heights.append(detections[0].height)
             if len(heights) >= required_detections:
                 break
@@ -347,6 +347,8 @@ def main() -> None:
             if key == ord("c"):
                 if not all_detections:
                     print("Calibration failed: no cone is detected.")
+                elif all_detections[0].cropped:
+                    print("Calibration failed: keep the full cone inside the image.")
                 else:
                     calibration = save_calibration(all_detections[0], frame.shape, args)
                     navigator = new_navigator(args)

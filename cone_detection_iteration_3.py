@@ -50,6 +50,8 @@ class CameraCalibration:
         distance_cm: float,
         frame_shape: tuple[int, ...],
     ) -> "CameraCalibration":
+        if detection.cropped:
+            raise ValueError("Calibration cone must be fully visible")
         if detection.height <= 0 or cone_height_cm <= 0 or distance_cm <= 0:
             raise ValueError("Cone height, pixel height, and distance must be positive")
         focal_length_px = detection.height * distance_cm / cone_height_cm
@@ -499,6 +501,9 @@ def main() -> None:
             if key == ord("c"):
                 if not detections:
                     print("Calibration failed: no cone is detected.")
+                    continue
+                if detections[0].cropped:
+                    print("Calibration failed: keep the full cone inside the image.")
                     continue
                 calibration = CameraCalibration.from_observation(
                     detections[0],

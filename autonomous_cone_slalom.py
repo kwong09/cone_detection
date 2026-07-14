@@ -190,8 +190,13 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
             return side_command("FORWARD", args.cruise_throttle, args.cruise_throttle)
 
     hard = (
-        navigator.smoothed_distance_cm is not None
-        and navigator.smoothed_distance_cm <= args.hard_turn_cm
+        (
+            getattr(navigator.current_target, "cropped", False)
+            or (
+                navigator.smoothed_distance_cm is not None
+                and navigator.smoothed_distance_cm <= args.hard_turn_cm
+            )
+        )
         and not navigator.clearance_seen
     )
     inside = args.hard_inside_throttle if hard else args.turn_inside_throttle

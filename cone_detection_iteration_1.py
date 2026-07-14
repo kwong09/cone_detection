@@ -22,6 +22,7 @@ class Detection:
     width: int
     height: int
     confidence: float
+    cropped: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -99,11 +100,12 @@ def make_red_mask(frame: np.ndarray) -> np.ndarray:
     """Return a mask tuned for the saturated red cones in the test room."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    # Red wraps around OpenCV's 0/179 hue boundary. These deliberately narrow
-    # ranges were measured from the supplied room screenshot. Skin was around
-    # hue 4-10, the wood around 11-13, and the red ball around 170-175.
-    low_red = cv2.inRange(hsv, (0, 140, 65), (2, 255, 255))
-    high_red = cv2.inRange(hsv, (176, 140, 65), (179, 255, 255))
+    # Red wraps around OpenCV's 0/179 hue boundary. Close cones can darken or
+    # shift slightly when auto-exposure reacts to the cone filling the image,
+    # so retain the original red-centered ranges with a small tolerance.
+    # Shape checks below still reject round red objects and broad patches.
+    low_red = cv2.inRange(hsv, (0, 120, 50), (3, 255, 255))
+    high_red = cv2.inRange(hsv, (176, 120, 50), (179, 255, 255))
     mask = cv2.bitwise_or(low_red, high_red)
 
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), dtype=np.uint8))
@@ -132,10 +134,12 @@ def contour_taper_ratio(contour: np.ndarray, x: int, y: int, width: int, height:
 def detect_cones(
     frame: np.ndarray, min_area: int = 450, min_confidence: float = 0.55
 ) -> list[Detection]:
-    """Detect saturated red regions that also have a cone silhouette."""
+    """Detect full cones and large partially cropped nearby cones."""
     mask = make_red_mask(frame)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detections: list[Detection] = []
+    frame_height, frame_width = frame.shape[:2]
+    frame_area = frame_width * frame_height
 
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -143,27 +147,102 @@ def detect_cones(
             continue
 
         x, y, width, height = cv2.boundingRect(contour)
-        # Reject balls, broad red objects, and horizontal patches.
-        if width == 0 or height < width * 1.05:
+        if width == 0 or height == 0:
             continue
 
         fill_ratio = area / (width * height)
         aspect_ratio = height / width
         taper_ratio = contour_taper_ratio(contour, x, y, width, height)
+        box_area_ratio = (width * height) / frame_area
+        height_ratio = height / frame_height
+        bottom_ratio = (y + height) / frame_height
+        perimeter = cv2.arcLength(contour, True)
+        circularity = (
+            4.0 * np.pi * area / (perimeter * perimeter)
+            if perimeter > 0
+            else 1.0
+        )
+        edge_margin = max(3, round(min(frame_width, frame_height) * 0.008))
+        touches_frame_edge = (
+            x <= edge_margin
+            or y <= edge_margin
+            or x + width >= frame_width - edge_margin
+            or y + height >= frame_height - edge_margin
+        )
 
-        # A cone should be substantially wider in its bottom third than in its
-        # top third. This is the main shape check that prevents arbitrary red
-        # rectangles or narrow vertical regions from being called cones.
-        if not 0.20 <= fill_ratio <= 0.82 or taper_ratio < 1.35:
+        # A fully visible cone is tall and substantially wider in its lower
+        # third. Keep this strict path for small/distant objects.
+        full_cone_shape = (
+            aspect_ratio >= 1.05
+            and 0.20 <= fill_ratio <= 0.82
+            and taper_ratio >= 1.35
+        )
+
+        # Large complete cones can look wider than they are tall. Keep strong
+        # taper for these, even though their aspect ratio is relaxed.
+        close_region = (
+            box_area_ratio >= 0.012
+            and height_ratio >= 0.18
+            and bottom_ratio >= 0.72
+        )
+        complete_close_cone_shape = (
+            close_region
+            and not touches_frame_edge
+            and aspect_ratio >= 0.65
+            and 0.15 <= fill_ratio <= 0.92
+            and taper_ratio >= 1.35
+        )
+
+        # A close cone may actually leave the image. Only this edge-clipped
+        # path accepts weaker taper, and it rejects circular silhouettes so a
+        # partially cropped red ball does not become the steering target.
+        cropped_close_cone_shape = (
+            close_region
+            and touches_frame_edge
+            and aspect_ratio >= 0.65
+            and 0.15 <= fill_ratio <= 0.92
+            and taper_ratio >= 1.05
+            and circularity <= 0.78
+        )
+        close_cone_shape = complete_close_cone_shape or cropped_close_cone_shape
+
+        if not full_cone_shape and not close_cone_shape:
             continue
 
-        fill_score = max(0.0, 1.0 - abs(fill_ratio - 0.52) / 0.40)
-        aspect_score = min(1.0, aspect_ratio / 1.35)
-        taper_score = min(1.0, (taper_ratio - 1.0) / 1.25)
-        confidence = 0.40 * fill_score + 0.25 * aspect_score + 0.35 * taper_score
+        confidence_scores: list[float] = []
+        if full_cone_shape:
+            fill_score = max(0.0, 1.0 - abs(fill_ratio - 0.52) / 0.40)
+            aspect_score = min(1.0, aspect_ratio / 1.35)
+            taper_score = min(1.0, (taper_ratio - 1.0) / 1.25)
+            confidence_scores.append(
+                0.40 * fill_score + 0.25 * aspect_score + 0.35 * taper_score
+            )
+        if close_cone_shape:
+            fill_score = max(0.0, 1.0 - abs(fill_ratio - 0.55) / 0.45)
+            aspect_score = min(1.0, aspect_ratio / 1.05)
+            taper_score = min(1.0, max(0.0, (taper_ratio - 1.0) / 0.40))
+            size_score = min(1.0, box_area_ratio / 0.06)
+            bottom_score = min(1.0, max(0.0, (bottom_ratio - 0.72) / 0.20))
+            confidence_scores.append(
+                0.15 * fill_score
+                + 0.20 * aspect_score
+                + 0.30 * taper_score
+                + 0.20 * size_score
+                + 0.15 * bottom_score
+            )
+        confidence = max(confidence_scores)
 
         if confidence >= min_confidence:
-            detections.append(Detection(x, y, width, height, confidence))
+            detections.append(
+                Detection(
+                    x,
+                    y,
+                    width,
+                    height,
+                    confidence,
+                    cropped=touches_frame_edge and close_region,
+                )
+            )
 
     return sorted(detections, key=lambda item: item.width * item.height, reverse=True)
 
