@@ -1,0 +1,6 @@
+adafruit-circuitpython-pca9685>=3.4,<4
+numpy>=1.24,<3
+opencv-python>=4.8,<5; platform_machine != "aarch64" and platform_machine != "armv7l"
+
+# Raspberry Pi OS: install Picamera2 and OpenCV with apt, not pip:
+# sudo apt install -y python3-picamera2 python3-opencv python3-numpy
