@@ -202,6 +202,29 @@ and quit. Losing camera frames, a normal remote-terminal disconnect, or
 pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
+For a raised-wheel test that makes the two turn directions unmistakable, use:
+
+```bash
+python3 combined_cone_detection_slalom.py --backend picamera2 \
+  --turn-test-mode --turn-outside-throttle 0.10 --ramp-step-us 10 --drive
+```
+
+Turn-test mode shows a large direction banner and deliberately suppresses
+forward motion while aligning to a far cone. A far centered cone leaves all
+four motors stopped; once the cone reaches the configured 130 cm turn threshold,
+the navigator deliberately commands its planned slalom direction. A LEFT
+command runs only motors 3-4 while motors 1-2 jump immediately to the verified
+stop pulse; a RIGHT command runs only motors 1-2 while motors 3-4 stop. Positive
+commands still ramp up. This mode rejects `--headless` and is only for a chassis
+secured with every wheel raised; remove `--turn-test-mode` for an actual course
+run.
+
+When `--drive` is used, the program now initializes the PCA9685 and writes the
+verified stop pulse before loading calibration or starting the camera. This
+reduces the startup delay before a stop command when motor power is already
+present, but it is not a substitute for the physical motor-power disconnect:
+Python or hardware can still fail before that write occurs.
+
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. The initial
 settings cap requested throttle at 18%, ramp motor pulses, stop immediately on

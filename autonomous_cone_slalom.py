@@ -54,7 +54,9 @@ WINDOW_NAME = "Autonomous Cone Slalom - Live Camera"
 class FourEscDrive:
     """Forward-only drive using the robot's measured ESC pulse values."""
 
-    def __init__(self, arm_seconds: float, ramp_step_us: int) -> None:
+    def __init__(self, ramp_step_us: int) -> None:
+        self._pca = None
+        self._closed = True
         try:
             import board
             import busio
@@ -65,14 +67,35 @@ class FourEscDrive:
                 "adafruit-circuitpython-pca9685."
             ) from error
 
-        self._pca = PCA9685(busio.I2C(board.SCL, board.SDA), address=I2C_ADDRESS)
-        self._pca.frequency = PWM_FREQUENCY
-        self._channels = [self._pca.channels[channel] for channel in ESC_CHANNELS]
-        self._current = list(MOTOR_STOP_US)
-        self._target = list(MOTOR_STOP_US)
-        self._ramp_step_us = ramp_step_us
-        self._closed = False
-        self.stop(immediate=True)
+        try:
+            self._pca = PCA9685(
+                busio.I2C(board.SCL, board.SDA),
+                address=I2C_ADDRESS,
+            )
+            self._pca.frequency = PWM_FREQUENCY
+            self._channels = [self._pca.channels[channel] for channel in ESC_CHANNELS]
+            self._current = list(MOTOR_STOP_US)
+            self._target = list(MOTOR_STOP_US)
+            self._ramp_step_us = ramp_step_us
+            self._closed = False
+            self.stop(immediate=True)
+        except BaseException:
+            if self._pca is not None:
+                try:
+                    if hasattr(self, "_channels"):
+                        self._current = list(MOTOR_STOP_US)
+                        self._write()
+                except BaseException:
+                    pass
+                try:
+                    self._pca.deinit()
+                except BaseException:
+                    pass
+            self._closed = True
+            raise
+
+    def arm(self, arm_seconds: float) -> None:
+        """Hold verified stop pulses while the ESCs complete startup."""
         print(
             f"Arming ESCs at the supplied {MOTOR_STOP_US[0]} us stop pulse "
             f"for {arm_seconds:.1f} seconds..."
@@ -106,11 +129,22 @@ class FourEscDrive:
             + throttle * (MOTOR_MAX_US[index] - MOTOR_START_US[index])
         )
 
-    def command(self, motor_throttles: tuple[float, float, float, float]) -> None:
+    def command(
+        self,
+        motor_throttles: tuple[float, float, float, float],
+        immediate_zero: bool = False,
+    ) -> None:
         self._target = [
             self._pulse_for_throttle(index, value)
             for index, value in enumerate(motor_throttles)
         ]
+        if immediate_zero:
+            # Raised-wheel turn testing needs the banner and actual motor
+            # groups to agree on the same frame. Positive commands still ramp
+            # up, but every zero-throttle channel jumps to its stop pulse.
+            for index, throttle in enumerate(motor_throttles):
+                if throttle == 0.0:
+                    self._current[index] = MOTOR_STOP_US[index]
 
     def step(self) -> None:
         for index, target in enumerate(self._target):
@@ -190,6 +224,8 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
         elif x_ratio > 0.56:
             direction = "RIGHT"
         else:
+            if getattr(args, "turn_test_mode", False):
+                return side_command("CENTERED - NO TURN", 0.0, 0.0)
             return side_command("FORWARD", args.cruise_throttle, args.cruise_throttle)
 
     hard = (
@@ -202,15 +238,130 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
         )
         and not navigator.clearance_seen
     )
-    inside = args.hard_inside_throttle if hard else args.turn_inside_throttle
+    if getattr(args, "turn_test_mode", False):
+        inside = 0.0
+    elif hard:
+        inside = args.hard_inside_throttle
+    else:
+        inside = args.turn_inside_throttle
     outside = args.turn_outside_throttle
     if direction == "RIGHT":
         return side_command("HARD RIGHT" if hard else "RIGHT", outside, inside)
     return side_command("HARD LEFT" if hard else "LEFT", inside, outside)
 
 
-def draw_autonomous_controls(dashboard: object, paused: bool) -> None:
+def turn_test_banner(
+    command: DriveCommand,
+    paused: bool,
+) -> tuple[str, str, tuple[int, int, int]]:
+    """Return an unmistakable raised-wheel direction and motor-group label."""
+    if paused:
+        return (
+            "TURN TEST - PAUSED",
+            "LEFT = M3-4  |  RIGHT = M1-2  |  FAR CENTER = ALL STOP",
+            (80, 230, 255),
+        )
+    if command.name in {"LEFT", "HARD LEFT"}:
+        return (
+            "<<<  TURN TEST: LEFT",
+            "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
+            (255, 220, 0),
+        )
+    if command.name in {"RIGHT", "HARD RIGHT"}:
+        return (
+            "TURN TEST: RIGHT  >>>",
+            "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",
+            (0, 165, 255),
+        )
+    if command.name == "CENTERED - NO TURN":
+        return (
+            "FAR CONE CENTERED - ALL STOP",
+            "MOVE IT LEFT/RIGHT, OR BRING IT CLOSER TO TRIGGER THE PLANNED TURN",
+            (90, 235, 90),
+        )
+    if command.name == "FORWARD":
+        return "FORWARD", "ALL FOUR MOTORS COMMANDED", (90, 235, 90)
+    return "STOP", "ALL FOUR MOTORS STOP", (80, 80, 255)
+
+
+def draw_autonomous_controls(
+    dashboard: object,
+    paused: bool,
+    command: DriveCommand,
+    turn_test_mode: bool,
+) -> None:
     """Replace the detector-only footer with autonomous drive controls."""
+    if turn_test_mode:
+        title, detail, color = turn_test_banner(command, paused)
+        cv2.rectangle(
+            dashboard,
+            (0, 0),
+            (dashboard.shape[1], 106),
+            (15, 15, 15),
+            -1,
+        )
+        title_scale = min(1.25, max(0.75, dashboard.shape[1] / 1050.0))
+        title_size = cv2.getTextSize(
+            title,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            title_scale,
+            4,
+        )[0]
+        title_x = max(12, (dashboard.shape[1] - title_size[0]) // 2)
+        cv2.putText(
+            dashboard,
+            title,
+            (title_x, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            title_scale,
+            (0, 0, 0),
+            8,
+        )
+        cv2.putText(
+            dashboard,
+            title,
+            (title_x, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            title_scale,
+            color,
+            4,
+        )
+        detail_scale = min(0.58, max(0.38, dashboard.shape[1] / 2400.0))
+        detail_size = cv2.getTextSize(
+            detail,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            detail_scale,
+            2,
+        )[0]
+        detail_x = max(12, (dashboard.shape[1] - detail_size[0]) // 2)
+        cv2.putText(
+            dashboard,
+            detail,
+            (detail_x, 74),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            detail_scale,
+            (225, 225, 225),
+            2,
+        )
+        warning = "WHEELS RAISED ONLY   |   SPACE/S = IMMEDIATE STOP"
+        warning_scale = min(0.48, max(0.34, dashboard.shape[1] / 2800.0))
+        warning_size = cv2.getTextSize(
+            warning,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            warning_scale,
+            1,
+        )[0]
+        warning_x = max(12, (dashboard.shape[1] - warning_size[0]) // 2)
+        cv2.putText(
+            dashboard,
+            warning,
+            (warning_x, 99),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            warning_scale,
+            (80, 80, 255),
+            1,
+        )
+
     cv2.rectangle(
         dashboard,
         (0, 108),
@@ -245,6 +396,14 @@ def parse_args() -> argparse.Namespace:
         "--headless",
         action="store_true",
         help="run without the live dashboard; autonomy starts immediately",
+    )
+    parser.add_argument(
+        "--turn-test-mode",
+        action="store_true",
+        help=(
+            "raised-wheel test only: show a large LEFT/RIGHT banner and stop "
+            "the inside motor pair during turns"
+        ),
     )
     parser.add_argument("--cone-height-cm", type=float, default=30.5)
     parser.add_argument("--calibration-distance-cm", type=float, default=100.0)
@@ -289,31 +448,44 @@ def main() -> None:
         raise SystemExit("Ramp step, camera-loss frames, and search timeout must be positive")
     if not args.drive:
         raise SystemExit("Refusing to move: rerun with --drive after raising the wheels and checking the kill switch.")
+    if args.turn_test_mode and args.headless:
+        raise SystemExit("Turn-test mode requires the live dashboard; remove --headless.")
+    if args.turn_test_mode and args.turn_outside_throttle <= 0.0:
+        raise SystemExit("Turn-test mode needs --turn-outside-throttle greater than zero.")
 
-    calibration = CameraCalibration.load(args.calibration_file)
-    if calibration is None:
-        raise SystemExit(
-            "No Pi slalom calibration found. Run cone_detector.py with --calibrate "
-            f"--calibration-file {args.calibration_file} before connecting motor power."
-        )
-    if (
-        calibration.frame_width != args.width
-        or calibration.frame_height != args.height
-        or abs(calibration.cone_height_cm - args.cone_height_cm) > 0.05
-    ):
-        raise SystemExit(
-            "Calibration does not match the requested resolution or cone height. "
-            "Recalibrate this Pi camera with the same width, height, and cone-height options."
-        )
-
-    camera = create_camera(args)
     drive: FourEscDrive | None = None
+    camera = None
     try:
-        drive = FourEscDrive(args.arm_seconds, args.ramp_step_us)
-        atexit.register(drive.close)
+        # Convert termination signals into a Python exit before touching the
+        # motor controller so partial initialization can run its cleanup path.
         signal.signal(signal.SIGTERM, lambda *_: raise_system_exit())
         if hasattr(signal, "SIGHUP"):
             signal.signal(signal.SIGHUP, lambda *_: raise_system_exit())
+
+        # When motor power is already connected, make the first hardware
+        # action a stop command. Camera startup and calibration loading happen
+        # only after all four ESC channels are at their verified stop pulses.
+        drive = FourEscDrive(args.ramp_step_us)
+        atexit.register(drive.close)
+        drive.arm(args.arm_seconds)
+
+        calibration = CameraCalibration.load(args.calibration_file)
+        if calibration is None:
+            raise SystemExit(
+                "No Pi slalom calibration found. Run cone_detector.py with --calibrate "
+                f"--calibration-file {args.calibration_file} before connecting motor power."
+            )
+        if (
+            calibration.frame_width != args.width
+            or calibration.frame_height != args.height
+            or abs(calibration.cone_height_cm - args.cone_height_cm) > 0.05
+        ):
+            raise SystemExit(
+                "Calibration does not match the requested resolution or cone height. "
+                "Recalibrate this Pi camera with the same width, height, and cone-height options."
+            )
+
+        camera = create_camera(args)
         navigator = new_navigator(args)
         preview_navigator = new_navigator(args)
         lost_frames = 0
@@ -326,6 +498,11 @@ def main() -> None:
             print("Headless autonomy starts immediately. Ctrl+C stops all motors.")
         else:
             print("Live dashboard starts PAUSED. G=go, Space/S=stop, R=reset, Q=quit.")
+        if args.turn_test_mode:
+            print(
+                "TURN TEST MODE: LEFT runs motors 3-4, RIGHT runs motors 1-2, "
+                "and the opposite pair stops. Raised wheels only."
+            )
 
         while True:
             ok, frame = camera.read()
@@ -364,7 +541,10 @@ def main() -> None:
             if paused:
                 command = side_command("PAUSED", 0.0, 0.0)
 
-            drive.command(command.throttles)
+            drive.command(
+                command.throttles,
+                immediate_zero=args.turn_test_mode,
+            )
             drive.step()
 
             status = f"{command.name}: {feedback}"
@@ -394,7 +574,12 @@ def main() -> None:
                     args.calibration_distance_cm,
                     display_width=args.display_width,
                 )
-                draw_autonomous_controls(dashboard, paused)
+                draw_autonomous_controls(
+                    dashboard,
+                    paused,
+                    command,
+                    args.turn_test_mode,
+                )
                 cv2.imshow(WINDOW_NAME, dashboard)
 
                 key = cv2.waitKey(1) & 0xFF
@@ -441,7 +626,8 @@ def main() -> None:
     finally:
         if drive is not None:
             drive.close()
-        camera.close()
+        if camera is not None:
+            camera.close()
         cv2.destroyAllWindows()
 
 

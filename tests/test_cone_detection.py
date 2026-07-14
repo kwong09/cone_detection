@@ -13,7 +13,13 @@ from cone_detection_iteration_5_pi import (
     calibrate_from_multiple_frames,
     detections_for_dashboard,
 )
-from autonomous_cone_slalom import choose_drive_command
+from autonomous_cone_slalom import (
+    DriveCommand,
+    FourEscDrive,
+    choose_drive_command,
+    main as autonomous_main,
+    turn_test_banner,
+)
 
 
 FRAME_SHAPE = (720, 1280, 3)
@@ -26,6 +32,138 @@ def polygon_frame(points: list[tuple[int, int]], color: tuple[int, int, int]) ->
 
 
 class ConeDetectionTests(unittest.TestCase):
+    def test_turn_test_mode_makes_left_and_right_motor_groups_distinct(self) -> None:
+        command_args = Namespace(
+            cruise_throttle=0.08,
+            turn_outside_throttle=0.10,
+            turn_inside_throttle=0.04,
+            hard_inside_throttle=0.0,
+            hard_turn_cm=80.0,
+            turn_test_mode=True,
+        )
+
+        def navigator_for(target: Detection) -> Namespace:
+            return Namespace(
+                current_target=target,
+                phase="APPROACHING",
+                close_cone_hazard=False,
+                countersteer_remaining=0,
+                awaiting_new_cone=False,
+                direction="RIGHT",
+                smoothed_distance_cm=180.0,
+                clearance_seen=False,
+            )
+
+        left = choose_drive_command(
+            navigator_for(Detection(100, 200, 200, 300, 0.9)),
+            FRAME_SHAPE[1],
+            command_args,
+        )
+        right = choose_drive_command(
+            navigator_for(Detection(980, 200, 200, 300, 0.9)),
+            FRAME_SHAPE[1],
+            command_args,
+        )
+
+        self.assertEqual(left.name, "LEFT")
+        self.assertEqual(left.throttles, (0.0, 0.0, 0.10, 0.10))
+        self.assertEqual(right.name, "RIGHT")
+        self.assertEqual(right.throttles, (0.10, 0.10, 0.0, 0.0))
+
+        centered = choose_drive_command(
+            navigator_for(Detection(540, 200, 200, 300, 0.9)),
+            FRAME_SHAPE[1],
+            command_args,
+        )
+        self.assertEqual(centered.name, "CENTERED - NO TURN")
+        self.assertEqual(centered.throttles, (0.0, 0.0, 0.0, 0.0))
+
+        close_turn = navigator_for(Detection(540, 200, 200, 300, 0.9))
+        close_turn.phase = "TURNING"
+        close_turn.smoothed_distance_cm = 100.0
+        planned_right = choose_drive_command(
+            close_turn,
+            FRAME_SHAPE[1],
+            command_args,
+        )
+        self.assertEqual(planned_right.name, "RIGHT")
+        self.assertEqual(planned_right.throttles, (0.10, 0.10, 0.0, 0.0))
+
+        command_args.turn_test_mode = False
+        normal_left = choose_drive_command(
+            navigator_for(Detection(100, 200, 200, 300, 0.9)),
+            FRAME_SHAPE[1],
+            command_args,
+        )
+        self.assertEqual(normal_left.throttles, (0.04, 0.04, 0.10, 0.10))
+
+        left_title, left_detail, _ = turn_test_banner(left, paused=False)
+        right_title, right_detail, _ = turn_test_banner(right, paused=False)
+        self.assertIn("LEFT", left_title)
+        self.assertIn("MOTORS 3-4 RUN", left_detail)
+        self.assertIn("RIGHT", right_title)
+        self.assertIn("MOTORS 1-2 RUN", right_detail)
+
+    def test_turn_test_banner_shows_all_motors_stopped_while_paused(self) -> None:
+        title, detail, _ = turn_test_banner(
+            DriveCommand("PAUSED", (0.0, 0.0, 0.0, 0.0)),
+            paused=True,
+        )
+        self.assertIn("PAUSED", title)
+        self.assertIn("LEFT = M3-4", detail)
+        self.assertIn("FAR CENTER", detail)
+
+    def test_turn_test_zero_channels_jump_to_stop_pulse(self) -> None:
+        drive = FourEscDrive.__new__(FourEscDrive)
+        drive._current = [1524, 1524, 1400, 1400]
+        drive._target = [1524, 1524, 1400, 1400]
+
+        drive.command((0.0, 0.0, 0.10, 0.10), immediate_zero=True)
+
+        self.assertEqual(drive._current, [1400, 1400, 1400, 1400])
+        self.assertEqual(drive._target, [1400, 1400, 1524, 1524])
+
+    def test_turn_test_mode_rejects_headless_immediate_start(self) -> None:
+        with patch(
+            "sys.argv",
+            ["combined_cone_detection_slalom.py", "--drive", "--turn-test-mode", "--headless"],
+        ):
+            with self.assertRaisesRegex(SystemExit, "requires the live dashboard"):
+                autonomous_main()
+
+    def test_drive_stops_before_calibration_and_closes_on_setup_failure(self) -> None:
+        events: list[str] = []
+
+        class FakeDrive:
+            def arm(self, _seconds: float) -> None:
+                events.append("arm")
+
+            def close(self) -> None:
+                events.append("close")
+
+        def make_drive(_ramp_step_us: int) -> FakeDrive:
+            events.append("drive-stop")
+            return FakeDrive()
+
+        def missing_calibration(_path: Path) -> None:
+            events.append("calibration")
+            return None
+
+        with (
+            patch("sys.argv", ["combined_cone_detection_slalom.py", "--drive"]),
+            patch("autonomous_cone_slalom.FourEscDrive", side_effect=make_drive),
+            patch(
+                "autonomous_cone_slalom.CameraCalibration.load",
+                side_effect=missing_calibration,
+            ),
+            patch("autonomous_cone_slalom.atexit.register"),
+            patch("autonomous_cone_slalom.signal.signal"),
+        ):
+            with self.assertRaisesRegex(SystemExit, "No Pi slalom calibration"):
+                autonomous_main()
+
+        self.assertEqual(events, ["drive-stop", "arm", "calibration", "close"])
+
     def test_dashboard_keeps_visible_cone_when_navigator_has_no_target(self) -> None:
         visible = Detection(304, 443, 248, 277, 0.98, cropped=True)
         self.assertEqual(detections_for_dashboard([visible], None), [visible])
