@@ -162,8 +162,7 @@ The calibration from the laptop is not valid for the Arducam. Measure the cone,
 place it 100 cm from the Arducam lens, and recalibrate using a 30-frame median:
 
 ```bash
-python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate \
-  --calibration-file pi_cone_camera_calibration.json
+python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate
 ```
 
 For Raspberry Pi OS Lite or operation without a monitor, calibrate first and
@@ -181,7 +180,8 @@ Use `--vflip` if the installed camera is upside down. Use `--camera 1` if
 First calibrate the Arducam with motor power disconnected:
 
 ```bash
-python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate
+python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate \
+  --calibration-file pi_cone_camera_calibration.json
 ```
 
 For the first motor test, raise all four wheels, keep the physical kill switch
@@ -204,8 +204,9 @@ wheels, test on the ground at low speed with wide cone spacing. If the chassis
 turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
 `LEFT_TURN_MOTORS` in the autonomous script before continuing.
 
-Press **R** to reset the sequence to the first cone. Press **Q** or **Escape**
-to stop.
+In the detector dashboard, press **R** to reset the sequence and **Q** or
+**Escape** to stop. The autonomous program runs headlessly and stops with
+**Ctrl+C** or the physical kill switch.
 
 If the wrong camera opens, try:
 
