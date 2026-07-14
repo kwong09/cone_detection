@@ -169,6 +169,7 @@ def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
         hard_turn_cm=args.hard_turn_cm,
         pass_distance_cm=args.pass_distance_cm,
         countersteer_frames=args.countersteer_frames,
+        max_cones=getattr(args, "max_cones", None),
     )
 
 

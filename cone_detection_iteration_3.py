@@ -326,7 +326,9 @@ def make_dashboard(
     panels = np.hstack((camera_panel, mask_panel))
     header = np.full((138, panels.shape[1], 3), (28, 28, 28), dtype=np.uint8)
     command_color = (0, 220, 255) if navigator.direction == "RIGHT" else (255, 220, 0)
-    if calibration is None:
+    if getattr(navigator, "course_complete", False):
+        command_color = (90, 235, 90)
+    elif calibration is None:
         command_color = (0, 80, 255)
 
     feedback_size = cv2.getTextSize(feedback, cv2.FONT_HERSHEY_SIMPLEX, 0.92, 3)[0]
@@ -362,10 +364,17 @@ def make_dashboard(
         2,
     )
 
-    motion_line = (
-        f"ROBOT {navigator.direction} -> CONE {navigator.expected_cone_side}   |   "
-        f"PHASE: {navigator.phase}   |   PASSED: {navigator.cones_passed}   |   NEXT: {navigator.next_direction}"
-    )
+    if getattr(navigator, "course_complete", False):
+        motion_line = (
+            f"COURSE COMPLETE   |   PASSED: {navigator.cones_passed}/"
+            f"{navigator.max_cones}   |   ALL MOTORS STOPPED"
+        )
+    else:
+        motion_line = (
+            f"ROBOT {navigator.direction} -> CONE {navigator.expected_cone_side}   |   "
+            f"PHASE: {navigator.phase}   |   PASSED: {navigator.cones_passed}   |   "
+            f"NEXT: {navigator.next_direction}"
+        )
     motion_size = cv2.getTextSize(motion_line, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)[0]
     motion_x = max(16, (header.shape[1] - motion_size[0]) // 2)
     cv2.putText(

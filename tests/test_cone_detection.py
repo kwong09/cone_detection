@@ -12,12 +12,19 @@ from cone_detection_iteration_4 import CameraMotionSlalomNavigator
 from cone_detection_iteration_5_pi import (
     calibrate_from_multiple_frames,
     detections_for_dashboard,
+    new_navigator,
 )
 from autonomous_cone_slalom import (
     DriveCommand,
     FourEscDrive,
+    apply_drive_output,
     choose_drive_command,
+    course_complete_feedback,
+    course_is_complete,
     main as autonomous_main,
+    new_preview_navigator,
+    parse_args as parse_autonomous_args,
+    synchronize_preview_course,
     turn_test_banner,
 )
 
@@ -32,6 +39,95 @@ def polygon_frame(points: list[tuple[int, int]], color: tuple[int, int, int]) ->
 
 
 class ConeDetectionTests(unittest.TestCase):
+    def test_paused_preview_cannot_change_displayed_course_progress(self) -> None:
+        preview = Namespace(cones_passed=2, direction_index=1)
+        navigator = Namespace(cones_passed=1, direction_index=0)
+
+        synchronize_preview_course(preview, navigator)
+
+        self.assertEqual(preview.cones_passed, 1)
+        self.assertEqual(preview.direction_index, 0)
+
+    def test_course_completion_bypasses_ramp_and_stops_immediately(self) -> None:
+        events: list[object] = []
+
+        class FakeDrive:
+            def stop(self, immediate: bool = False) -> None:
+                events.append(("stop", immediate))
+
+            def command(self, *_args: object, **_kwargs: object) -> None:
+                events.append("command")
+
+            def step(self) -> None:
+                events.append("step")
+
+        apply_drive_output(
+            FakeDrive(),  # type: ignore[arg-type]
+            DriveCommand("COURSE COMPLETE", (0.0, 0.0, 0.0, 0.0)),
+            Namespace(turn_test_mode=False),
+            course_complete=True,
+        )
+
+        self.assertEqual(events, [("stop", True)])
+
+    def test_third_pass_latches_complete_without_countersteering(self) -> None:
+        navigator = CameraMotionSlalomNavigator(
+            max_cones=3,
+            cones_passed=2,
+            direction_index=0,
+            countersteer_frames=12,
+        )
+
+        navigator._finish_pass()
+
+        self.assertEqual(navigator.cones_passed, 3)
+        self.assertTrue(navigator.course_complete)
+        self.assertEqual(navigator.phase, "COMPLETE")
+        self.assertEqual(navigator.countersteer_remaining, 0)
+        self.assertFalse(navigator.awaiting_new_cone)
+        self.assertEqual(navigator.direction_index, 0)
+        self.assertIn("COURSE COMPLETE", navigator.update([], None, FRAME_SHAPE))
+
+        args = Namespace(max_cones=3)
+        self.assertTrue(course_is_complete(navigator, args))
+        self.assertIn("3 CONES PASSED", course_complete_feedback(args))
+        command = choose_drive_command(navigator, FRAME_SHAPE[1], args)
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.0, 0.0))
+
+        title, _, _ = turn_test_banner(
+            DriveCommand("COURSE COMPLETE", (0.0, 0.0, 0.0, 0.0)),
+            paused=True,
+        )
+        self.assertIn("COURSE COMPLETE", title)
+
+    def test_second_pass_still_alternates_and_countersteers(self) -> None:
+        navigator = CameraMotionSlalomNavigator(
+            max_cones=3,
+            cones_passed=1,
+            direction_index=0,
+            countersteer_frames=12,
+        )
+
+        navigator._finish_pass()
+
+        self.assertEqual(navigator.cones_passed, 2)
+        self.assertFalse(navigator.course_complete)
+        self.assertEqual(navigator.direction_index, 1)
+        self.assertEqual(navigator.countersteer_remaining, 12)
+        self.assertTrue(navigator.awaiting_new_cone)
+
+    def test_three_cone_course_uses_slower_defaults(self) -> None:
+        with patch("sys.argv", ["combined_cone_detection_slalom.py"]):
+            args = parse_autonomous_args()
+
+        self.assertEqual(args.max_cones, 3)
+        self.assertEqual(args.cruise_throttle, 0.10)
+        self.assertEqual(args.turn_outside_throttle, 0.12)
+        self.assertEqual(args.turn_inside_throttle, 0.04)
+        self.assertEqual(args.ramp_step_us, 10)
+        self.assertEqual(new_navigator(args).max_cones, 3)
+        self.assertIsNone(new_preview_navigator(args).max_cones)
+
     def test_turn_test_mode_makes_left_and_right_motor_groups_distinct(self) -> None:
         command_args = Namespace(
             cruise_throttle=0.08,

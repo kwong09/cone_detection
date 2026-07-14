@@ -198,11 +198,60 @@ def side_command(name: str, right_turn: float, left_turn: float) -> DriveCommand
     return DriveCommand(name, tuple(values))  # type: ignore[arg-type]
 
 
+def course_is_complete(navigator: object, args: argparse.Namespace) -> bool:
+    """Latch completion once the configured number of cones has been passed."""
+    max_cones = getattr(args, "max_cones", None)
+    return (
+        bool(getattr(navigator, "course_complete", False))
+        or (
+            isinstance(max_cones, int)
+            and max_cones >= 1
+            and navigator.cones_passed >= max_cones
+        )
+    )
+
+
+def course_complete_feedback(args: argparse.Namespace) -> str:
+    return f"COURSE COMPLETE - {args.max_cones} CONES PASSED - MOTORS STOPPED"
+
+
+def new_preview_navigator(args: argparse.Namespace) -> object:
+    """Create paused camera feedback that cannot complete the real course."""
+    preview = new_navigator(args)
+    preview.max_cones = None
+    return preview
+
+
+def synchronize_preview_course(preview: object, navigator: object) -> None:
+    """Keep paused display progress tied to the real autonomous run."""
+    preview.cones_passed = navigator.cones_passed
+    preview.direction_index = navigator.direction_index
+
+
+def apply_drive_output(
+    drive: FourEscDrive,
+    command: DriveCommand,
+    args: argparse.Namespace,
+    course_complete: bool,
+) -> None:
+    """Apply one command, bypassing all ramps for the completed-course stop."""
+    if course_complete:
+        drive.stop(immediate=True)
+        return
+    drive.command(
+        command.throttles,
+        immediate_zero=args.turn_test_mode,
+    )
+    drive.step()
+
+
 def choose_drive_command(navigator: object, frame_width: int, args: argparse.Namespace) -> DriveCommand:
     """Convert navigator state into conservative differential motor output."""
     stop = side_command("STOP", 0.0, 0.0)
     target = navigator.current_target
 
+    if course_is_complete(navigator, args):
+        return side_command("STOP - COURSE COMPLETE", 0.0, 0.0)
     if navigator.phase == "CALIBRATION REQUIRED":
         return stop
     if navigator.close_cone_hazard:
@@ -255,6 +304,12 @@ def turn_test_banner(
     paused: bool,
 ) -> tuple[str, str, tuple[int, int, int]]:
     """Return an unmistakable raised-wheel direction and motor-group label."""
+    if command.name == "COURSE COMPLETE":
+        return (
+            "COURSE COMPLETE - ALL STOP",
+            "ALL REQUIRED CONES PASSED  |  PRESS R TO RESET",
+            (90, 235, 90),
+        )
     if paused:
         return (
             "TURN TEST - PAUSED",
@@ -289,6 +344,9 @@ def draw_autonomous_controls(
     paused: bool,
     command: DriveCommand,
     turn_test_mode: bool,
+    cones_passed: int,
+    max_cones: int,
+    course_complete: bool,
 ) -> None:
     """Replace the detector-only footer with autonomous drive controls."""
     if turn_test_mode:
@@ -369,14 +427,26 @@ def draw_autonomous_controls(
         (28, 28, 28),
         -1,
     )
-    state = "PAUSED" if paused else "DRIVING"
+    if course_complete:
+        footer = (
+            f"COMPLETE {cones_passed}/{max_cones}   |   ALL MOTORS STOPPED   |   "
+            "R = RESET   Q/ESC = QUIT"
+        )
+        footer_color = (90, 235, 90)
+    else:
+        state = "PAUSED" if paused else "DRIVING"
+        footer = (
+            f"{state} {cones_passed}/{max_cones}   |   G = GO   SPACE/S = STOP   "
+            "R = RESET + STOP   Q/ESC = QUIT"
+        )
+        footer_color = (80, 230, 255) if paused else (120, 255, 120)
     cv2.putText(
         dashboard,
-        f"{state}   |   G = GO   SPACE/S = STOP   R = RESET + STOP   Q/ESC = QUIT",
+        footer,
         (16, 128),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.48,
-        (80, 230, 255) if paused else (120, 255, 120),
+        footer_color,
         1,
     )
 
@@ -413,12 +483,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-turn-cm", type=float, default=80.0)
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
     parser.add_argument("--countersteer-frames", type=int, default=12)
-    parser.add_argument("--cruise-throttle", type=float, default=0.16)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.18)
-    parser.add_argument("--turn-inside-throttle", type=float, default=0.07)
+    parser.add_argument(
+        "--max-cones",
+        type=int,
+        default=3,
+        help="stop and remain stopped after this many confirmed cone passes",
+    )
+    parser.add_argument("--cruise-throttle", type=float, default=0.10)
+    parser.add_argument("--turn-outside-throttle", type=float, default=0.12)
+    parser.add_argument("--turn-inside-throttle", type=float, default=0.04)
     parser.add_argument("--hard-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
-    parser.add_argument("--ramp-step-us", type=int, default=25)
+    parser.add_argument("--ramp-step-us", type=int, default=10)
     parser.add_argument("--camera-loss-frames", type=int, default=3)
     parser.add_argument(
         "--search-timeout-seconds",
@@ -440,12 +516,24 @@ def main() -> None:
     for name in ("cruise_throttle", "turn_outside_throttle", "turn_inside_throttle", "hard_inside_throttle"):
         if not 0.0 <= getattr(args, name) <= 0.25:
             raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 0.25")
+    if not (
+        args.turn_outside_throttle >= args.cruise_throttle
+        and args.turn_outside_throttle > args.turn_inside_throttle
+        and args.hard_inside_throttle <= args.turn_inside_throttle
+    ):
+        raise SystemExit(
+            "Throttle settings must satisfy: outside >= cruise, outside > inside, "
+            "and hard-inside <= inside"
+        )
     if (
         args.ramp_step_us < 1
         or args.camera_loss_frames < 1
         or args.search_timeout_seconds <= 0
+        or args.max_cones < 1
     ):
-        raise SystemExit("Ramp step, camera-loss frames, and search timeout must be positive")
+        raise SystemExit(
+            "Ramp step, camera-loss frames, search timeout, and max cones must be positive"
+        )
     if not args.drive:
         raise SystemExit("Refusing to move: rerun with --drive after raising the wheels and checking the kill switch.")
     if args.turn_test_mode and args.headless:
@@ -487,7 +575,7 @@ def main() -> None:
 
         camera = create_camera(args)
         navigator = new_navigator(args)
-        preview_navigator = new_navigator(args)
+        preview_navigator = new_preview_navigator(args)
         lost_frames = 0
         blind_search_started_at: float | None = None
         previous_status = ""
@@ -498,6 +586,10 @@ def main() -> None:
             print("Headless autonomy starts immediately. Ctrl+C stops all motors.")
         else:
             print("Live dashboard starts PAUSED. G=go, Space/S=stop, R=reset, Q=quit.")
+        print(
+            f"Course plan: drive and alternate around {args.max_cones} cones, "
+            "then stop and wait for R."
+        )
         if args.turn_test_mode:
             print(
                 "TURN TEST MODE: LEFT runs motors 3-4, RIGHT runs motors 1-2, "
@@ -516,36 +608,51 @@ def main() -> None:
 
             lost_frames = 0
             detections = detect_cones(frame, min_area=args.min_area)
-            view_navigator = preview_navigator if paused else navigator
-            feedback = view_navigator.update(detections, calibration, frame.shape)
-            command = choose_drive_command(view_navigator, frame.shape[1], args)
-
-            blind_searching = (
-                not paused
-                and view_navigator.current_target is None
-                and view_navigator.awaiting_new_cone
-                and view_navigator.countersteer_remaining == 0
-                and not view_navigator.close_cone_hazard
+            course_complete = course_is_complete(navigator, args)
+            view_navigator = (
+                navigator
+                if course_complete
+                else preview_navigator if paused else navigator
             )
-            if blind_searching:
-                if blind_search_started_at is None:
-                    blind_search_started_at = time.monotonic()
-                if (
-                    time.monotonic() - blind_search_started_at
-                    >= args.search_timeout_seconds
-                ):
-                    command = side_command("STOP - NEXT CONE NOT FOUND", 0.0, 0.0)
+            if course_complete:
+                feedback = course_complete_feedback(args)
             else:
+                feedback = view_navigator.update(detections, calibration, frame.shape)
+                if paused:
+                    # Preview tracking may react to cones moved by hand, but it
+                    # must never display progress or direction from a run that
+                    # did not actually happen.
+                    synchronize_preview_course(preview_navigator, navigator)
+                course_complete = course_is_complete(navigator, args)
+                if course_complete:
+                    feedback = course_complete_feedback(args)
+            if course_complete:
+                command = side_command("COURSE COMPLETE", 0.0, 0.0)
                 blind_search_started_at = None
+            else:
+                command = choose_drive_command(view_navigator, frame.shape[1], args)
+                blind_searching = (
+                    not paused
+                    and view_navigator.current_target is None
+                    and view_navigator.awaiting_new_cone
+                    and view_navigator.countersteer_remaining == 0
+                    and not view_navigator.close_cone_hazard
+                )
+                if blind_searching:
+                    if blind_search_started_at is None:
+                        blind_search_started_at = time.monotonic()
+                    if (
+                        time.monotonic() - blind_search_started_at
+                        >= args.search_timeout_seconds
+                    ):
+                        command = side_command("STOP - NEXT CONE NOT FOUND", 0.0, 0.0)
+                else:
+                    blind_search_started_at = None
 
-            if paused:
-                command = side_command("PAUSED", 0.0, 0.0)
+                if paused:
+                    command = side_command("PAUSED", 0.0, 0.0)
 
-            drive.command(
-                command.throttles,
-                immediate_zero=args.turn_test_mode,
-            )
-            drive.step()
+            apply_drive_output(drive, command, args, course_complete)
 
             status = f"{command.name}: {feedback}"
             if status != previous_status:
@@ -558,11 +665,17 @@ def main() -> None:
                     detections,
                     view_navigator.current_target,
                 )
-                visual_feedback = (
-                    "PAUSED - PRESS G TO START AUTONOMOUS DRIVE"
-                    if paused
-                    else f"MOTORS {command.name} | {feedback}"
-                )
+                if course_complete:
+                    visual_feedback = (
+                        f"COURSE COMPLETE: {args.max_cones} CONES - STOPPED (R = RESET)"
+                    )
+                elif paused:
+                    visual_feedback = "PAUSED - PRESS G TO START AUTONOMOUS DRIVE"
+                else:
+                    visual_feedback = (
+                        f"MOTORS {command.name} | CONES "
+                        f"{view_navigator.cones_passed}/{args.max_cones} | {feedback}"
+                    )
                 dashboard = make_dashboard(
                     frame,
                     mask,
@@ -579,6 +692,9 @@ def main() -> None:
                     paused,
                     command,
                     args.turn_test_mode,
+                    navigator.cones_passed,
+                    args.max_cones,
+                    course_complete,
                 )
                 cv2.imshow(WINDOW_NAME, dashboard)
 
@@ -605,18 +721,22 @@ def main() -> None:
                     break
                 if key in (ord(" "), ord("s"), ord("S")):
                     paused = True
-                    preview_navigator = new_navigator(args)
+                    preview_navigator = new_preview_navigator(args)
                     blind_search_started_at = None
                     drive.stop(immediate=True)
                 elif key in (ord("g"), ord("G")):
-                    if not has_started:
-                        navigator = new_navigator(args)
-                        has_started = True
-                    blind_search_started_at = None
-                    paused = False
+                    if course_complete:
+                        # Completion is latched. Only R may start a new course.
+                        drive.stop(immediate=True)
+                    else:
+                        if not has_started:
+                            navigator = new_navigator(args)
+                            has_started = True
+                        blind_search_started_at = None
+                        paused = False
                 elif key in (ord("r"), ord("R")):
                     navigator = new_navigator(args)
-                    preview_navigator = new_navigator(args)
+                    preview_navigator = new_preview_navigator(args)
                     has_started = False
                     blind_search_started_at = None
                     paused = True

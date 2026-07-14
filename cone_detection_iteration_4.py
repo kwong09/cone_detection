@@ -53,6 +53,8 @@ class CameraMotionSlalomNavigator:
     countersteer_remaining: int = 0
     awaiting_new_cone: bool = False
     close_cone_hazard: bool = False
+    max_cones: int | None = None
+    course_complete: bool = False
 
     @property
     def direction(self) -> str:
@@ -155,6 +157,13 @@ class CameraMotionSlalomNavigator:
 
     def _finish_pass(self) -> None:
         self.cones_passed += 1
+        if self.max_cones is not None and self.cones_passed >= self.max_cones:
+            self.course_complete = True
+            self.phase = "COMPLETE"
+            self.countersteer_remaining = 0
+            self.awaiting_new_cone = False
+            self._reset_target_tracking()
+            return
         self.direction_index = 1 - self.direction_index
         self.phase = "COUNTERSTEERING"
         self.countersteer_remaining = self.countersteer_frames
@@ -167,6 +176,8 @@ class CameraMotionSlalomNavigator:
         calibration: CameraCalibration | None,
         frame_shape: tuple[int, ...],
     ) -> str:
+        if self.course_complete:
+            return self.feedback(calibrated=calibration is not None, frame_shape=frame_shape)
         if calibration is None:
             self.phase = "CALIBRATION REQUIRED"
             self.current_target = None
@@ -267,6 +278,8 @@ class CameraMotionSlalomNavigator:
         return self.feedback(calibrated=True, frame_shape=frame_shape)
 
     def feedback(self, calibrated: bool, frame_shape: tuple[int, ...]) -> str:
+        if self.course_complete:
+            return f"COURSE COMPLETE - {self.cones_passed}/{self.max_cones} CONES - STOP"
         if not calibrated:
             return "CALIBRATE DISTANCE: PLACE CONE AT MARK + PRESS C"
         if self.countersteer_remaining > 0 or self.phase == "COUNTERSTEERING":

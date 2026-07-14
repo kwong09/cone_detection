@@ -202,6 +202,21 @@ and quit. Losing camera frames, a normal remote-terminal disconnect, or
 pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
+The beginning-of-course configuration drives toward a centered cone, begins
+its alternating turn at 130 cm, confirms the pass from cone motion, and repeats
+for exactly three cones:
+
+```bash
+python3 combined_cone_detection_slalom.py --backend picamera2 \
+  --display-width 1200 --max-cones 3 --drive
+```
+
+After the third confirmed pass, the program skips the normal countersteer,
+commands every motor directly to the stop pulse, and remains stopped even if
+the camera sees more cones or the operator presses **G** again. The dashboard
+shows `COURSE COMPLETE: 3 CONES - STOPPED`. Press **R** only when intentionally
+resetting the three-cone sequence.
+
 For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
@@ -227,12 +242,14 @@ Python or hardware can still fail before that write occurs.
 
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. The initial
-settings cap requested throttle at 18%, ramp motor pulses, stop immediately on
-camera loss, stop after two seconds of searching without seeing the next cone,
-and stop on Ctrl+C. Once direction and stopping have been verified with raised
-wheels, test on the ground at low speed with wide cone spacing. If the chassis
-turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
-`LEFT_TURN_MOTORS` in the autonomous script before continuing.
+settings now use 10% forward throttle, 12% outside-turn throttle, 4% inside-turn
+throttle, and a gentler 10 us ramp step so the camera has more time to react.
+The program also stops immediately on camera loss, stops after two seconds of
+searching without seeing the next cone, and stops on Ctrl+C. Once direction and
+stopping have been verified with raised wheels, test on the ground at low speed
+with wide cone spacing. If the chassis turns opposite the printed direction,
+swap `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
+continuing.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.
