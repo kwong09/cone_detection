@@ -172,6 +172,16 @@ def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
     )
 
 
+def detections_for_dashboard(
+    detections: list[Detection],
+    current_target: Detection | None,
+) -> list[Detection]:
+    """Show every detected cone, with the navigation target drawn first."""
+    if current_target is None:
+        return detections
+    return [current_target, *(item for item in detections if item is not current_target)]
+
+
 def save_calibration(
     detection: Detection,
     frame_shape: tuple[int, ...],
@@ -323,13 +333,14 @@ def main() -> None:
                 continue
 
             mask = make_red_mask(frame)
-            target_detections = (
-                [navigator.current_target] if navigator.current_target is not None else []
+            display_detections = detections_for_dashboard(
+                all_detections,
+                navigator.current_target,
             )
             dashboard = make_dashboard(
                 frame,
                 mask,
-                target_detections,
+                display_detections,
                 navigator,
                 feedback,
                 navigator.smoothed_distance_cm,

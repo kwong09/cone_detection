@@ -52,6 +52,7 @@ class CameraMotionSlalomNavigator:
     missing_frames: int = 0
     countersteer_remaining: int = 0
     awaiting_new_cone: bool = False
+    close_cone_hazard: bool = False
 
     @property
     def direction(self) -> str:
@@ -76,6 +77,7 @@ class CameraMotionSlalomNavigator:
         self.pass_armed = False
         self.moving_away_frames = 0
         self.missing_frames = 0
+        self.close_cone_hazard = False
 
     def _relative_side_progress(self, center_x_ratio: float) -> float:
         if self.turn_start_x_ratio is None:
@@ -101,6 +103,11 @@ class CameraMotionSlalomNavigator:
         calibration: CameraCalibration,
         frame_shape: tuple[int, ...],
     ) -> Detection | None:
+        # A close, ambiguous cone is a latched safety stop. A dropped camera
+        # frame must not restart the motors; only resetting the navigator
+        # clears this state.
+        if self.close_cone_hazard:
+            return None
         if not detections:
             return None
         if not self.awaiting_new_cone:
@@ -111,12 +118,28 @@ class CameraMotionSlalomNavigator:
         # bottom, and generally closer to the forward center of the image.
         candidates: list[Detection] = []
         for detection in detections:
-            if detection.cropped:
-                continue
             distance = calibration.estimate_distance_cm(detection, frame_shape)
             bottom_ratio = (detection.y + detection.height) / frame_shape[0]
-            if distance >= self.pass_distance_cm * 1.35 and bottom_ratio < 0.86:
+            center_ratio = detection.center[0] / frame_shape[1]
+            visually_close = (
+                detection.cropped
+                or distance <= self.hard_turn_cm
+                or bottom_ratio >= 0.82
+            )
+            if visually_close and 0.20 <= center_ratio <= 0.80:
+                # This may be the cone just passed or an unexpectedly close
+                # new cone. Do not guess and count it twice: expose a STOP
+                # condition while the dashboard still outlines the cone.
+                self.close_cone_hazard = True
+                continue
+            if (
+                not detection.cropped
+                and distance >= self.pass_distance_cm * 1.35
+                and bottom_ratio < 0.86
+            ):
                 candidates.append(detection)
+        if self.close_cone_hazard:
+            return None
         if not candidates:
             return None
 
@@ -249,6 +272,8 @@ class CameraMotionSlalomNavigator:
         if self.countersteer_remaining > 0 or self.phase == "COUNTERSTEERING":
             return f"TURN {self.direction} NOW - CONE {self.cones_passed} PASSED"
         if self.current_target is None:
+            if self.close_cone_hazard:
+                return "STOP - CLOSE CONE DETECTED WHILE SEARCHING"
             if self.pass_armed:
                 return f"HOLD {self.direction} - CONE LEAVING VIEW"
             if self.awaiting_new_cone:

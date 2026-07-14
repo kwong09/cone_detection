@@ -26,6 +26,7 @@ from cone_detection_iteration_1 import detect_cones, make_red_mask
 from cone_detection_iteration_3 import CameraCalibration, make_dashboard
 from cone_detection_iteration_5_pi import (
     create_camera,
+    detections_for_dashboard,
     new_navigator,
     validate_args as validate_camera_args,
 )
@@ -170,6 +171,8 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
 
     if navigator.phase == "CALIBRATION REQUIRED":
         return stop
+    if navigator.close_cone_hazard:
+        return side_command("STOP - CLOSE CONE", 0.0, 0.0)
 
     # Countersteering and finding the next cone require the newly alternated turn.
     if navigator.countersteer_remaining > 0 or (
@@ -345,6 +348,7 @@ def main() -> None:
                 and view_navigator.current_target is None
                 and view_navigator.awaiting_new_cone
                 and view_navigator.countersteer_remaining == 0
+                and not view_navigator.close_cone_hazard
             )
             if blind_searching:
                 if blind_search_started_at is None:
@@ -370,10 +374,9 @@ def main() -> None:
 
             if not args.headless:
                 mask = make_red_mask(frame)
-                target_detections = (
-                    [view_navigator.current_target]
-                    if view_navigator.current_target is not None
-                    else []
+                display_detections = detections_for_dashboard(
+                    detections,
+                    view_navigator.current_target,
                 )
                 visual_feedback = (
                     "PAUSED - PRESS G TO START AUTONOMOUS DRIVE"
@@ -383,7 +386,7 @@ def main() -> None:
                 dashboard = make_dashboard(
                     frame,
                     mask,
-                    target_detections,
+                    display_detections,
                     view_navigator,
                     visual_feedback,
                     view_navigator.smoothed_distance_cm,

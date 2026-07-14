@@ -228,6 +228,13 @@ is partly outside the image. It keeps the stricter tapered-shape requirements
 for small distant objects, while allowing a large cone low in the image to
 remain outlined as the robot approaches it.
 
+The dashboard outlines every cone accepted by the detector, even while the
+slalom navigator is temporarily ignoring a previously passed cone. If an
+ambiguous close cone remains near the forward center after countersteering, the
+autonomous program outlines it and stops the motors instead of guessing that it
+is the next cone and possibly counting the same cone twice. Reposition the robot
+at the course start and press `R` before starting another run.
+
 If distant cones are ignored, reduce the minimum area, for example:
 
 ```bash

@@ -9,7 +9,11 @@ import numpy as np
 from cone_detection_iteration_1 import Detection, detect_cones
 from cone_detection_iteration_3 import CameraCalibration
 from cone_detection_iteration_4 import CameraMotionSlalomNavigator
-from cone_detection_iteration_5_pi import calibrate_from_multiple_frames
+from cone_detection_iteration_5_pi import (
+    calibrate_from_multiple_frames,
+    detections_for_dashboard,
+)
+from autonomous_cone_slalom import choose_drive_command
 
 
 FRAME_SHAPE = (720, 1280, 3)
@@ -22,6 +26,50 @@ def polygon_frame(points: list[tuple[int, int]], color: tuple[int, int, int]) ->
 
 
 class ConeDetectionTests(unittest.TestCase):
+    def test_dashboard_keeps_visible_cone_when_navigator_has_no_target(self) -> None:
+        visible = Detection(304, 443, 248, 277, 0.98, cropped=True)
+        self.assertEqual(detections_for_dashboard([visible], None), [visible])
+
+    def test_awaiting_navigator_stops_for_ambiguous_close_cone(self) -> None:
+        visible = Detection(304, 443, 248, 277, 0.98, cropped=True)
+        calibration = CameraCalibration(
+            focal_length_px=4000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        navigator = CameraMotionSlalomNavigator(
+            turn_start_cm=130.0,
+            hard_turn_cm=80.0,
+            pass_distance_cm=60.0,
+            awaiting_new_cone=True,
+        )
+        feedback = navigator.update([visible], calibration, FRAME_SHAPE)
+        self.assertIsNone(navigator.current_target)
+        self.assertTrue(navigator.awaiting_new_cone)
+        self.assertTrue(navigator.close_cone_hazard)
+        self.assertTrue(feedback.startswith("STOP"))
+
+        command_args = Namespace(
+            cruise_throttle=0.12,
+            turn_outside_throttle=0.12,
+            turn_inside_throttle=0.07,
+            hard_inside_throttle=0.0,
+            hard_turn_cm=80.0,
+        )
+        command = choose_drive_command(navigator, FRAME_SHAPE[1], command_args)
+        self.assertEqual(command.name, "STOP - CLOSE CONE")
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.0, 0.0))
+
+        # A single missed detection must not restart a blind search turn.
+        feedback = navigator.update([], calibration, FRAME_SHAPE)
+        self.assertTrue(navigator.close_cone_hazard)
+        self.assertTrue(feedback.startswith("STOP"))
+        command = choose_drive_command(navigator, FRAME_SHAPE[1], command_args)
+        self.assertEqual(command.name, "STOP - CLOSE CONE")
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.0, 0.0))
+
     def test_detects_complete_distant_cone(self) -> None:
         frame = polygon_frame(
             [(640, 180), (500, 620), (780, 620)],
