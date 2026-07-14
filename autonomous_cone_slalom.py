@@ -20,8 +20,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from cone_detection_iteration_1 import detect_cones
-from cone_detection_iteration_3 import CameraCalibration
+import cv2
+
+from cone_detection_iteration_1 import detect_cones, make_red_mask
+from cone_detection_iteration_3 import CameraCalibration, make_dashboard
 from cone_detection_iteration_5_pi import (
     create_camera,
     new_navigator,
@@ -45,6 +47,7 @@ MOTOR_MAX_US = (2100, 2100, 2100, 2100)
 # These names describe the requested turn, not assumed chassis wiring.
 RIGHT_TURN_MOTORS = (0, 1)
 LEFT_TURN_MOTORS = (2, 3)
+WINDOW_NAME = "Autonomous Cone Slalom - Live Camera"
 
 
 class FourEscDrive:
@@ -198,6 +201,27 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     return side_command("HARD LEFT" if hard else "LEFT", inside, outside)
 
 
+def draw_autonomous_controls(dashboard: object, paused: bool) -> None:
+    """Replace the detector-only footer with autonomous drive controls."""
+    cv2.rectangle(
+        dashboard,
+        (0, 108),
+        (dashboard.shape[1], 137),
+        (28, 28, 28),
+        -1,
+    )
+    state = "PAUSED" if paused else "DRIVING"
+    cv2.putText(
+        dashboard,
+        f"{state}   |   G = GO   SPACE/S = STOP   R = RESET + STOP   Q/ESC = QUIT",
+        (16, 128),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (80, 230, 255) if paused else (120, 255, 120),
+        1,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Autonomous red-cone slalom driver")
     parser.add_argument("--backend", choices=("auto", "picamera2", "opencv"), default="auto")
@@ -209,7 +233,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hflip", action="store_true")
     parser.add_argument("--vflip", action="store_true")
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
-    parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="run without the live dashboard; autonomy starts immediately",
+    )
     parser.add_argument("--cone-height-cm", type=float, default=30.5)
     parser.add_argument("--calibration-distance-cm", type=float, default=100.0)
     pi_calibration_file = Path(__file__).with_name("pi_cone_camera_calibration.json")
@@ -276,11 +304,20 @@ def main() -> None:
         drive = FourEscDrive(args.arm_seconds, args.ramp_step_us)
         atexit.register(drive.close)
         signal.signal(signal.SIGTERM, lambda *_: raise_system_exit())
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, lambda *_: raise_system_exit())
         navigator = new_navigator(args)
+        preview_navigator = new_navigator(args)
         lost_frames = 0
         blind_search_started_at: float | None = None
         previous_status = ""
-        print(f"Autonomous slalom active using {camera.name}. Ctrl+C stops all motors.")
+        paused = not args.headless
+        has_started = args.headless
+        print(f"Autonomous slalom camera active using {camera.name}.")
+        if args.headless:
+            print("Headless autonomy starts immediately. Ctrl+C stops all motors.")
+        else:
+            print("Live dashboard starts PAUSED. G=go, Space/S=stop, R=reset, Q=quit.")
 
         while True:
             ok, frame = camera.read()
@@ -294,13 +331,15 @@ def main() -> None:
 
             lost_frames = 0
             detections = detect_cones(frame, min_area=args.min_area)
-            feedback = navigator.update(detections, calibration, frame.shape)
-            command = choose_drive_command(navigator, frame.shape[1], args)
+            view_navigator = preview_navigator if paused else navigator
+            feedback = view_navigator.update(detections, calibration, frame.shape)
+            command = choose_drive_command(view_navigator, frame.shape[1], args)
 
             blind_searching = (
-                navigator.current_target is None
-                and navigator.awaiting_new_cone
-                and navigator.countersteer_remaining == 0
+                not paused
+                and view_navigator.current_target is None
+                and view_navigator.awaiting_new_cone
+                and view_navigator.countersteer_remaining == 0
             )
             if blind_searching:
                 if blind_search_started_at is None:
@@ -313,6 +352,9 @@ def main() -> None:
             else:
                 blind_search_started_at = None
 
+            if paused:
+                command = side_command("PAUSED", 0.0, 0.0)
+
             drive.command(command.throttles)
             drive.step()
 
@@ -320,12 +362,79 @@ def main() -> None:
             if status != previous_status:
                 print(status)
                 previous_status = status
+
+            if not args.headless:
+                mask = make_red_mask(frame)
+                target_detections = (
+                    [view_navigator.current_target]
+                    if view_navigator.current_target is not None
+                    else []
+                )
+                visual_feedback = (
+                    "PAUSED - PRESS G TO START AUTONOMOUS DRIVE"
+                    if paused
+                    else f"MOTORS {command.name} | {feedback}"
+                )
+                dashboard = make_dashboard(
+                    frame,
+                    mask,
+                    target_detections,
+                    view_navigator,
+                    visual_feedback,
+                    view_navigator.smoothed_distance_cm,
+                    calibration,
+                    args.calibration_distance_cm,
+                    display_width=args.display_width,
+                )
+                draw_autonomous_controls(dashboard, paused)
+                cv2.imshow(WINDOW_NAME, dashboard)
+
+                key = cv2.waitKey(1) & 0xFF
+                ui_framework = (
+                    cv2.currentUIFramework().upper()
+                    if hasattr(cv2, "currentUIFramework")
+                    else ""
+                )
+                if ui_framework == "WAYLAND":
+                    window_visible = 1.0
+                else:
+                    try:
+                        window_visible = cv2.getWindowProperty(
+                            WINDOW_NAME, cv2.WND_PROP_VISIBLE
+                        )
+                    except cv2.error:
+                        window_visible = 1.0
+                if window_visible == 0:
+                    drive.stop(immediate=True)
+                    break
+                if key in (ord("q"), ord("Q"), 27):
+                    drive.stop(immediate=True)
+                    break
+                if key in (ord(" "), ord("s"), ord("S")):
+                    paused = True
+                    preview_navigator = new_navigator(args)
+                    blind_search_started_at = None
+                    drive.stop(immediate=True)
+                elif key in (ord("g"), ord("G")):
+                    if not has_started:
+                        navigator = new_navigator(args)
+                        has_started = True
+                    blind_search_started_at = None
+                    paused = False
+                elif key in (ord("r"), ord("R")):
+                    navigator = new_navigator(args)
+                    preview_navigator = new_navigator(args)
+                    has_started = False
+                    blind_search_started_at = None
+                    paused = True
+                    drive.stop(immediate=True)
     except KeyboardInterrupt:
         print("Stopped by operator.")
     finally:
         if drive is not None:
             drive.close()
         camera.close()
+        cv2.destroyAllWindows()
 
 
 def raise_system_exit() -> None:

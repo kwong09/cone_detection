@@ -195,6 +195,13 @@ flag is deliberately required:
 python3 combined_cone_detection_slalom.py --backend picamera2 --drive
 ```
 
+The autonomous program opens a live annotated camera-and-mask dashboard and
+starts **paused**. Press **G** to begin driving, **Space** or **S** to stop and
+pause, **R** to reset the slalom while stopped, and **Q** or **Escape** to stop
+and quit. Losing camera frames, a normal remote-terminal disconnect, or
+pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
+no live window is needed; headless autonomy starts immediately.
+
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. The initial
 settings cap requested throttle at 18%, ramp motor pulses, stop immediately on
@@ -204,9 +211,8 @@ wheels, test on the ground at low speed with wide cone spacing. If the chassis
 turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
 `LEFT_TURN_MOTORS` in the autonomous script before continuing.
 
-In the detector dashboard, press **R** to reset the sequence and **Q** or
-**Escape** to stop. The autonomous program runs headlessly and stops with
-**Ctrl+C** or the physical kill switch.
+In the detector-only dashboard, press **R** to reset the sequence and **Q** or
+**Escape** to stop.
 
 If the wrong camera opens, try:
 
