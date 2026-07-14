@@ -30,6 +30,10 @@ does not need an internet connection or a trained AI model.
   desktop dashboard and headless feedback. This is the current version.
 - `cone_detector.py`: convenience launcher for the newest iteration (currently
   Iteration 5).
+- `autonomous_cone_slalom.py`: combines Iteration 5 detection/navigation with
+  the four-ESC controller and commands a low-speed, forward-only slalom.
+- `combined_cone_detection_slalom.py`: clearly named Raspberry Pi launcher for
+  the same combined cone-detection and autonomous-slalom program.
 
 ## 1. Install
 
@@ -158,7 +162,8 @@ The calibration from the laptop is not valid for the Arducam. Measure the cone,
 place it 100 cm from the Arducam lens, and recalibrate using a 30-frame median:
 
 ```bash
-python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate
+python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate \
+  --calibration-file pi_cone_camera_calibration.json
 ```
 
 For Raspberry Pi OS Lite or operation without a monitor, calibrate first and
@@ -170,6 +175,34 @@ python3 cone_detector.py --backend picamera2 --headless
 
 Use `--vflip` if the installed camera is upside down. Use `--camera 1` if
 `rpicam-hello --list-cameras` reports the desired sensor at index 1.
+
+## Autonomous motor control
+
+First calibrate the Arducam with motor power disconnected:
+
+```bash
+python3 cone_detector.py --backend picamera2 --cone-height-cm 30.5 --calibrate
+```
+
+For the first motor test, raise all four wheels, keep the physical kill switch
+in reach, and verify that `RIGHT` turns the chassis right and `LEFT` turns it
+left. The combined program uses the supplied controller's **1400 us stop** and
+**1460 us starting** pulses. Do not run it if the installed ESCs instead use
+1500 us neutral; update and re-test the pulse calibration first. The `--drive`
+flag is deliberately required:
+
+```bash
+python3 combined_cone_detection_slalom.py --backend picamera2 --drive
+```
+
+The autonomous program deliberately uses a separate Pi calibration file so a
+calibration committed from another camera cannot start the robot. The initial
+settings cap requested throttle at 18%, ramp motor pulses, stop immediately on
+camera loss, stop after two seconds of searching without seeing the next cone,
+and stop on Ctrl+C. Once direction and stopping have been verified with raised
+wheels, test on the ground at low speed with wide cone spacing. If the chassis
+turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
+`LEFT_TURN_MOTORS` in the autonomous script before continuing.
 
 Press **R** to reset the sequence to the first cone. Press **Q** or **Escape**
 to stop.
