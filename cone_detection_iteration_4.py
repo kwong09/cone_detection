@@ -40,6 +40,8 @@ class CameraMotionSlalomNavigator:
     countersteer_frames: int = 12
     pass_confirmation_frames: int = 3
     visual_turn_confirmation_frames: int = 2
+    emergency_turn_min_height_ratio: float = 0.45
+    emergency_turn_min_bottom_ratio: float = 0.82
     camera_offset_cm: float = 0.0
     direction_index: int = 0
     cones_passed: int = 0
@@ -541,14 +543,33 @@ class CameraMotionSlalomNavigator:
         self.tallest_target_px = max(self.tallest_target_px, target.height)
 
         if self.phase == "APPROACHING":
+            # Calibrated range remains the normal turn trigger. If that
+            # calibration is badly wrong, do not continue driving into a cone
+            # that is unmistakably large and low in the camera view. Requiring
+            # two consecutive frames and stricter visual limits than the
+            # general close-cone safety check avoids the former early turns.
+            visual_turn_candidate = (
+                bottom_ratio >= self.emergency_turn_min_bottom_ratio
+                and height_ratio >= self.emergency_turn_min_height_ratio
+            )
+            if visual_turn_candidate:
+                self.visual_turn_frames += 1
+            else:
+                self.visual_turn_frames = 0
+
             distance_turn_ready = (
                 raw_distance <= self.turn_start_cm
                 or self.smoothed_distance_cm <= self.turn_start_cm
             )
-            if distance_turn_ready:
+            visual_turn_ready = (
+                self.visual_turn_frames >= self.visual_turn_confirmation_frames
+            )
+            if distance_turn_ready or visual_turn_ready:
                 self.phase = "TURNING"
                 self.turn_start_x_ratio = center_x_ratio
-                self.turn_trigger_source = "DISTANCE"
+                self.turn_trigger_source = (
+                    "DISTANCE" if distance_turn_ready else "CLOSE CONE BACKUP"
+                )
 
         if self.phase in {"TURNING", "PASSING"}:
             cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
@@ -639,6 +660,8 @@ class CameraMotionSlalomNavigator:
         cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
         if cleared_side:
             return f"HOLD {self.direction} - CONE SLID {self.expected_cone_side}"
+        if self.turn_trigger_source == "CLOSE CONE BACKUP":
+            return f"BEGIN SLOW {self.direction} TURN - CLOSE CONE VISUAL BACKUP"
         return f"BEGIN SLOW {self.direction} TURN - TRACK CONE MOTION"
 
 

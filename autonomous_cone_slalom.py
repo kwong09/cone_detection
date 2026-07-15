@@ -747,7 +747,15 @@ def parse_args() -> argparse.Namespace:
         help="stop and remain stopped after this many confirmed cone passes",
     )
     parser.add_argument("--cruise-throttle", type=float, default=0.003)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.0045)
+    parser.add_argument(
+        "--turn-outside-throttle",
+        type=float,
+        default=0.015,
+        help=(
+            "forward-only outside-pair turn power; the higher default supplies "
+            "enough torque for two motors to drag the stopped inside wheels"
+        ),
+    )
     parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
     parser.add_argument("--ramp-step-us", type=int, default=3)

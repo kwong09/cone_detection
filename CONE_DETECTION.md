@@ -220,6 +220,7 @@ turn early:
 python3 combined_cone_detection_slalom.py --backend picamera2 \
   --vflip --display-width 1200 --max-cones 3 \
   --robot-width-cm 30.48 --camera-from-left-cm 7.62 \
+  --turn-outside-throttle 0.015 --turn-inside-throttle 0 \
   --creep-move-seconds 0.20 --creep-pause-seconds 0.30 \
   --countersteer-frames 12 --search-timeout-seconds 4 --drive
 ```
@@ -264,8 +265,10 @@ cone. An independent stop deadline ends each movement burst even if the camera
 loop is delayed.
 
 During a movement burst, straight driving uses a 1462 us low moving pulse. A
-turn uses 1463 us on the outside motor pair and the 1400 us stop
-pulse on the inside pair. There is no hard-turn mode. Every turn, counterturn,
+turn uses 1470 us on the outside motor pair and the 1400 us stop
+pulse on the inside pair. The extra turn-only torque lets two powered wheels
+drag the two stopped inside wheels; straight speed is unchanged. There is no
+hard-turn mode. Every turn, counterturn,
 and next-cone search uses the same gentle output, and no motor is ever commanded
 in reverse. During every camera-view pause, all four channels are
 at 1400 us. Moving channels jump directly to their minimum moving pulse because
@@ -293,6 +296,13 @@ and `AUTO MOVE` display with raised wheels before a bounded ground test with
 wide cone spacing. If the chassis turns opposite the printed direction, swap
 `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
 continuing.
+
+Calibrated distance is the normal turn trigger. As a collision backup, two
+consecutive frames showing a cone at least 45% of the image height with its
+base in the bottom 18% start the same slow turn even if the calibration still
+reports a long distance. The dashboard labels this `CLOSE CONE VISUAL BACKUP`.
+The stricter visual limits prevent the earlier 30%-height trigger from starting
+a turn while a cone is still far away.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.

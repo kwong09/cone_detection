@@ -316,6 +316,45 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(navigator.turn_trigger_source, "DISTANCE")
         self.assertIn("BEGIN SLOW RIGHT TURN", feedback)
 
+    def test_close_visual_backup_turns_when_calibrated_range_is_wrong(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=5000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        unmistakably_close = Detection(450, 300, 380, 360, 0.98)
+        navigator = CameraMotionSlalomNavigator(turn_start_cm=130.0)
+
+        first_feedback = navigator.update(
+            [unmistakably_close], calibration, FRAME_SHAPE
+        )
+        self.assertEqual(navigator.phase, "APPROACHING")
+        self.assertIn("FORWARD", first_feedback)
+        self.assertGreater(navigator.raw_distance_cm or 0.0, 130.0)
+
+        second_feedback = navigator.update(
+            [unmistakably_close], calibration, FRAME_SHAPE
+        )
+        self.assertEqual(navigator.phase, "TURNING")
+        self.assertEqual(navigator.turn_trigger_source, "CLOSE CONE BACKUP")
+        self.assertIn("CLOSE CONE VISUAL BACKUP", second_feedback)
+
+        command = choose_drive_command(
+            navigator,
+            FRAME_SHAPE[1],
+            Namespace(
+                max_cones=3,
+                cruise_throttle=0.003,
+                turn_outside_throttle=0.015,
+                turn_inside_throttle=0.0,
+                turn_test_mode=False,
+            ),
+        )
+        self.assertEqual(command.name, "RIGHT")
+        self.assertEqual(command.throttles, (0.015, 0.015, 0.0, 0.0))
+
     def test_visual_size_never_bypasses_distance_at_any_resolution(self) -> None:
         calibration = CameraCalibration(
             focal_length_px=2000.0,
@@ -854,7 +893,7 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(args.turn_start_height_ratio, 0.30)
         self.assertEqual(args.countersteer_frames, 12)
         self.assertEqual(args.cruise_throttle, 0.003)
-        self.assertEqual(args.turn_outside_throttle, 0.0045)
+        self.assertEqual(args.turn_outside_throttle, 0.015)
         self.assertEqual(args.turn_inside_throttle, 0.0)
         self.assertEqual(args.robot_width_cm, 30.48)
         self.assertEqual(args.camera_from_left_cm, 7.62)
@@ -868,7 +907,7 @@ class ConeDetectionTests(unittest.TestCase):
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle),
-            1463,
+            1470,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle),
