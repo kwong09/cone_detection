@@ -714,7 +714,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration-distance-cm", type=float, default=100.0)
     pi_calibration_file = Path(__file__).with_name("pi_cone_camera_calibration.json")
     parser.add_argument("--calibration-file", type=Path, default=pi_calibration_file)
-    parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument(
+        "--turn-start-cm",
+        type=float,
+        default=160.0,
+        help="begin the slow slalom turn at this calibrated cone distance",
+    )
     parser.add_argument(
         "--turn-start-height-ratio",
         type=float,

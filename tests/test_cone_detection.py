@@ -324,15 +324,17 @@ class ConeDetectionTests(unittest.TestCase):
             frame_height=720,
             calibration_distance_cm=100.0,
         )
-        unmistakably_close = Detection(450, 300, 380, 360, 0.98)
-        navigator = CameraMotionSlalomNavigator(turn_start_cm=130.0)
+        # This cone is large enough to need turning clearance, but it is not
+        # nearly touching the bottom of the camera view.
+        unmistakably_close = Detection(470, 280, 340, 270, 0.98)
+        navigator = CameraMotionSlalomNavigator(turn_start_cm=160.0)
 
         first_feedback = navigator.update(
             [unmistakably_close], calibration, FRAME_SHAPE
         )
         self.assertEqual(navigator.phase, "APPROACHING")
         self.assertIn("FORWARD", first_feedback)
-        self.assertGreater(navigator.raw_distance_cm or 0.0, 130.0)
+        self.assertGreater(navigator.raw_distance_cm or 0.0, 160.0)
 
         second_feedback = navigator.update(
             [unmistakably_close], calibration, FRAME_SHAPE
@@ -890,6 +892,7 @@ class ConeDetectionTests(unittest.TestCase):
             args = parse_autonomous_args()
 
         self.assertEqual(args.max_cones, 3)
+        self.assertEqual(args.turn_start_cm, 160.0)
         self.assertEqual(args.turn_start_height_ratio, 0.30)
         self.assertEqual(args.countersteer_frames, 12)
         self.assertEqual(args.cruise_throttle, 0.003)

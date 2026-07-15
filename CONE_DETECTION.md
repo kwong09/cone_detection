@@ -91,7 +91,7 @@ changing the camera, resolution, lens, camera mode, or digital crop.
 
 The default slalom timing is:
 
-- Begin the alternating turn at 130 cm.
+- Begin the alternating turn at 160 cm.
 - Use 80 cm only as a close-cone safety/clearance threshold; motor output does
   not increase at this distance.
 - Arm pass detection at 60 cm once the cone is on the correct side.
@@ -211,7 +211,7 @@ pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
 The beginning-of-course configuration drives straight toward the selected cone,
-begins its alternating turn only when calibrated range reaches 130 cm, confirms
+begins its alternating turn when calibrated range reaches 160 cm, confirms
 the pass from cone motion, and repeats for exactly three cones. Cone size remains
 a safety check while acquiring the next cone, but it no longer starts a normal
 turn early:
@@ -220,6 +220,7 @@ turn early:
 python3 combined_cone_detection_slalom.py --backend picamera2 \
   --vflip --display-width 1200 --max-cones 3 \
   --robot-width-cm 30.48 --camera-from-left-cm 7.62 \
+  --turn-start-cm 160 \
   --turn-outside-throttle 0.015 --turn-inside-throttle 0 \
   --creep-move-seconds 0.20 --creep-pause-seconds 0.30 \
   --countersteer-frames 12 --search-timeout-seconds 4 --drive
@@ -240,7 +241,7 @@ python3 combined_cone_detection_slalom.py --backend picamera2 \
 
 Turn-test mode shows a large direction banner and deliberately suppresses
 forward motion during the approach phase. A far cone leaves all four motors
-stopped; once the cone reaches the configured 130 cm turn threshold,
+stopped; once the cone reaches the configured 160 cm turn threshold,
 the navigator deliberately commands its planned slalom direction. A LEFT
 command runs only motors 3-4 while motors 1-2 jump immediately to the verified
 stop pulse; a RIGHT command runs only motors 1-2 while motors 3-4 stop. Positive
@@ -297,12 +298,12 @@ wide cone spacing. If the chassis turns opposite the printed direction, swap
 `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
 continuing.
 
-Calibrated distance is the normal turn trigger. As a collision backup, two
-consecutive frames showing a cone at least 45% of the image height with its
-base in the bottom 18% start the same slow turn even if the calibration still
+Calibrated distance is the normal turn trigger. As a clearance backup, two
+consecutive frames showing a cone at least 36% of the image height with its
+base in the bottom 24% start the same slow turn even if the calibration still
 reports a long distance. The dashboard labels this `CLOSE CONE VISUAL BACKUP`.
-The stricter visual limits prevent the earlier 30%-height trigger from starting
-a turn while a cone is still far away.
+These limits remain stricter than the earlier 30%-height trigger, while leaving
+room for the wheels to arc around the cone.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.

@@ -32,7 +32,7 @@ from cone_detection_iteration_3 import (
 class CameraMotionSlalomNavigator:
     """Time a slalom pass using distance and cone motion in a turning camera."""
 
-    turn_start_cm: float = 130.0
+    turn_start_cm: float = 160.0
     turn_start_height_ratio: float = 0.30
     visual_turn_min_bottom_ratio: float = 0.72
     hard_turn_cm: float = 80.0
@@ -40,8 +40,8 @@ class CameraMotionSlalomNavigator:
     countersteer_frames: int = 12
     pass_confirmation_frames: int = 3
     visual_turn_confirmation_frames: int = 2
-    emergency_turn_min_height_ratio: float = 0.45
-    emergency_turn_min_bottom_ratio: float = 0.82
+    emergency_turn_min_height_ratio: float = 0.36
+    emergency_turn_min_bottom_ratio: float = 0.76
     camera_offset_cm: float = 0.0
     direction_index: int = 0
     cones_passed: int = 0
@@ -691,7 +691,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calibration-file", type=Path, default=DEFAULT_CALIBRATION_FILE
     )
-    parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument("--turn-start-cm", type=float, default=160.0)
     parser.add_argument(
         "--turn-start-height-ratio",
         type=float,
