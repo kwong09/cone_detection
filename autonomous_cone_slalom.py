@@ -670,6 +670,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--display-width", type=int, default=1600)
     parser.add_argument("--min-area", type=int, default=450)
+    parser.add_argument(
+        "--robot-width-cm",
+        type=float,
+        default=30.48,
+        help="vehicle width; 30.48 cm is 12 inches",
+    )
+    parser.add_argument(
+        "--camera-from-left-cm",
+        type=float,
+        default=7.62,
+        help="camera center measured from the vehicle's left side; 7.62 cm is 3 inches",
+    )
     parser.add_argument("--hflip", action="store_true")
     parser.add_argument("--vflip", action="store_true")
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
@@ -722,15 +734,15 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="stop and remain stopped after this many confirmed cone passes",
     )
-    parser.add_argument("--cruise-throttle", type=float, default=0.0015)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.003)
+    parser.add_argument("--cruise-throttle", type=float, default=0.003)
+    parser.add_argument("--turn-outside-throttle", type=float, default=0.0045)
     parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
     parser.add_argument("--ramp-step-us", type=int, default=3)
     parser.add_argument(
         "--creep-move-seconds",
         type=float,
-        default=0.15,
+        default=0.20,
         help="seconds of minimum-pulse movement in each creep cycle",
     )
     parser.add_argument(
@@ -849,6 +861,18 @@ def main() -> None:
             f"forward {FourEscDrive._pulse_for_throttle(0, args.cruise_throttle)} us, "
             f"turn outside {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
             f"turn inside {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
+        )
+        camera_offset_cm = args.camera_from_left_cm - args.robot_width_cm / 2.0
+        if camera_offset_cm < 0.0:
+            camera_position = f"{abs(camera_offset_cm):.2f} cm left of vehicle center"
+        elif camera_offset_cm > 0.0:
+            camera_position = f"{camera_offset_cm:.2f} cm right of vehicle center"
+        else:
+            camera_position = "on the vehicle centerline"
+        print(
+            f"Camera geometry: {args.robot_width_cm:.2f} cm robot width, camera "
+            f"{args.camera_from_left_cm:.2f} cm from the left "
+            f"({camera_position})."
         )
         print(
             f"Creep starts with {args.creep_pause_seconds:.2f} s ALL-STOP CAMERA VIEW, "

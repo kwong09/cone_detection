@@ -57,23 +57,23 @@ def bare_drive() -> FourEscDrive:
 
 
 class ConeDetectionTests(unittest.TestCase):
-    def test_creep_gate_starts_stopped_then_moves_at_one_third_duty(self) -> None:
-        gate = MotionPulseGate(move_seconds=0.15, pause_seconds=0.30)
+    def test_creep_gate_starts_stopped_then_moves_at_forty_percent_duty(self) -> None:
+        gate = MotionPulseGate(move_seconds=0.20, pause_seconds=0.30)
         planned = DriveCommand("FORWARD", (0.0001, 0.0001, 0.0001, 0.0001))
 
         first = gate.limit(planned, 0.0)
         just_before_move = gate.limit(planned, 0.299)
         move = gate.limit(planned, 0.30)
         move_deadline = gate.move_deadline
-        just_before_pause = gate.limit(planned, 0.449)
-        next_pause = gate.limit(planned, 0.45)
+        just_before_pause = gate.limit(planned, 0.499)
+        next_pause = gate.limit(planned, 0.50)
 
-        self.assertAlmostEqual(gate.duty_cycle, 1 / 3)
+        self.assertAlmostEqual(gate.duty_cycle, 0.4)
         self.assertEqual(first.throttles, (0.0, 0.0, 0.0, 0.0))
         self.assertTrue(first.name.startswith("VIEW PAUSE"))
         self.assertEqual(just_before_move.throttles, (0.0, 0.0, 0.0, 0.0))
         self.assertEqual(move, planned)
-        self.assertAlmostEqual(move_deadline or 0.0, 0.45)
+        self.assertAlmostEqual(move_deadline or 0.0, 0.50)
         self.assertEqual(just_before_pause, planned)
         self.assertEqual(next_pause.throttles, (0.0, 0.0, 0.0, 0.0))
 
@@ -345,6 +345,54 @@ class ConeDetectionTests(unittest.TestCase):
 
                 self.assertEqual(navigator.phase, "APPROACHING")
                 self.assertIsNone(navigator.turn_trigger_source)
+
+    def test_left_mounted_camera_corrects_to_vehicle_centerline(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=1000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        # At about 130 cm, a cone on the vehicle centerline appears roughly
+        # 59 pixels right of image center because the camera is 7.62 cm left.
+        vehicle_centerline_cone = Detection(659, 300, 80, 235, 0.95)
+        navigator = CameraMotionSlalomNavigator(camera_offset_cm=-7.62)
+
+        navigator.update([vehicle_centerline_cone], calibration, FRAME_SHAPE)
+
+        self.assertAlmostEqual(
+            navigator.corrected_center_x_ratio or 0.0,
+            0.5,
+            delta=0.002,
+        )
+
+    def test_next_cone_selection_uses_vehicle_center_not_camera_center(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=1000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        image_centered = Detection(600, 300, 80, 100, 0.95)
+        # At this cone's roughly 305 cm range, vehicle center is about 25 px
+        # right of the left-mounted camera's image center.
+        vehicle_centered = Detection(625, 300, 80, 100, 0.95)
+        navigator = CameraMotionSlalomNavigator(
+            camera_offset_cm=-7.62,
+            awaiting_new_cone=True,
+            phase="SEARCHING",
+        )
+
+        navigator.update(
+            [image_centered, vehicle_centered],
+            calibration,
+            FRAME_SHAPE,
+            motion_applied=False,
+        )
+
+        self.assertIs(navigator.current_target, vehicle_centered)
 
     def test_cropped_cone_immediately_triggers_turn_despite_distance_smoothing(self) -> None:
         calibration = CameraCalibration(
@@ -736,26 +784,30 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(args.max_cones, 3)
         self.assertEqual(args.turn_start_height_ratio, 0.30)
         self.assertEqual(args.countersteer_frames, 12)
-        self.assertEqual(args.cruise_throttle, 0.0015)
-        self.assertEqual(args.turn_outside_throttle, 0.003)
+        self.assertEqual(args.cruise_throttle, 0.003)
+        self.assertEqual(args.turn_outside_throttle, 0.0045)
         self.assertEqual(args.turn_inside_throttle, 0.0)
+        self.assertEqual(args.robot_width_cm, 30.48)
+        self.assertEqual(args.camera_from_left_cm, 7.62)
         self.assertEqual(args.ramp_step_us, 3)
-        self.assertEqual(args.creep_move_seconds, 0.15)
+        self.assertEqual(args.creep_move_seconds, 0.20)
         self.assertEqual(args.creep_pause_seconds, 0.30)
         self.assertEqual(args.search_timeout_seconds, 4.0)
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.cruise_throttle),
-            1461,
+            1462,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle),
-            1462,
+            1463,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle),
             1400,
         )
-        self.assertEqual(new_navigator(args).max_cones, 3)
+        navigator = new_navigator(args)
+        self.assertEqual(navigator.max_cones, 3)
+        self.assertAlmostEqual(navigator.camera_offset_cm, -7.62)
         self.assertIsNone(new_preview_navigator(args).max_cones)
 
     def test_turn_test_mode_makes_left_and_right_motor_groups_distinct(self) -> None:

@@ -171,6 +171,9 @@ def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
         pass_distance_cm=args.pass_distance_cm,
         countersteer_frames=args.countersteer_frames,
         max_cones=getattr(args, "max_cones", None),
+        camera_offset_cm=(
+            args.camera_from_left_cm - args.robot_width_cm / 2.0
+        ),
     )
 
 
@@ -255,6 +258,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--display-width", type=int, default=1600)
     parser.add_argument("--min-area", type=int, default=450)
+    parser.add_argument(
+        "--robot-width-cm",
+        type=float,
+        default=30.48,
+        help="vehicle width; 30.48 cm is 12 inches",
+    )
+    parser.add_argument(
+        "--camera-from-left-cm",
+        type=float,
+        default=7.62,
+        help="camera center measured from the vehicle's left side; 7.62 cm is 3 inches",
+    )
     parser.add_argument("--hflip", action="store_true", help="mirror image horizontally")
     parser.add_argument("--vflip", action="store_true", help="flip an upside-down camera")
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
@@ -300,6 +315,7 @@ def validate_args(args: argparse.Namespace) -> None:
         args.hard_turn_cm,
         args.pass_distance_cm,
         args.warmup_seconds,
+        args.robot_width_cm,
     ) <= 0:
         raise SystemExit("Image sizes, times, and physical measurements must be positive")
     if not args.turn_start_cm > args.hard_turn_cm > args.pass_distance_cm:
@@ -308,6 +324,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("turn-start-height-ratio must be between 0 and 1")
     if args.countersteer_frames < 1:
         raise SystemExit("countersteer-frames must be at least 1")
+    if not 0.0 <= args.camera_from_left_cm <= args.robot_width_cm:
+        raise SystemExit("camera-from-left must be between zero and robot-width")
 
 
 def main() -> None:

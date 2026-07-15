@@ -219,7 +219,8 @@ turn early:
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
   --vflip --display-width 1200 --max-cones 3 \
-  --creep-move-seconds 0.15 --creep-pause-seconds 0.30 \
+  --robot-width-cm 30.48 --camera-from-left-cm 7.62 \
+  --creep-move-seconds 0.20 --creep-pause-seconds 0.30 \
   --countersteer-frames 12 --search-timeout-seconds 4 --drive
 ```
 
@@ -233,7 +234,7 @@ For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --turn-test-mode --turn-outside-throttle 0.003 --ramp-step-us 3 --drive
+  --turn-test-mode --turn-outside-throttle 0.0045 --ramp-step-us 3 --drive
 ```
 
 Turn-test mode shows a large direction banner and deliberately suppresses
@@ -256,32 +257,38 @@ Python or hardware can still fail before that write occurs.
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. Every new
 motion sequence starts with a 0.30-second all-stop camera observation. It then
-alternates 0.15 seconds of movement with 0.30 seconds at all-stop, for about 33%
+alternates 0.20 seconds of movement with 0.30 seconds at all-stop, for 40%
 commanded movement duty. The same gate limits forward driving, slalom turns,
-slalom turns, the post-pass counterturn, and the turn used to find the next
+the post-pass counterturn, and the turn used to find the next
 cone. An independent stop deadline ends each movement burst even if the camera
 loop is delayed.
 
-During a movement burst, straight driving uses a 1461 us low moving pulse. A
-turn uses 1462 us on the outside motor pair and the 1400 us stop
+During a movement burst, straight driving uses a 1462 us low moving pulse. A
+turn uses 1463 us on the outside motor pair and the 1400 us stop
 pulse on the inside pair. There is no hard-turn mode. Every turn, counterturn,
 and next-cone search uses the same gentle output, and no motor is ever commanded
 in reverse. During every camera-view pause, all four channels are
 at 1400 us. Moving channels jump directly to their minimum moving pulse because
-ramping from stop would consume most or all of a 0.15-second burst. Operator,
+ramping from stop would consume most or all of a 0.20-second burst. Operator,
 camera-loss, close-cone, course-complete, and other zero-output stops bypass the
 cycle and stop immediately.
+
+The robot is 30.48 cm (12 inches) wide and the camera is 7.62 cm (3 inches)
+from its left side, placing the camera 7.62 cm left of the vehicle centerline.
+Navigation dynamically corrects each cone's horizontal position using that
+offset and its estimated distance. A cone on the vehicle centerline should
+therefore appear slightly right of the camera image center, especially nearby.
 
 After a confirmed pass, the direction alternates. The counterturn lasts up to
 12 applied-motion frames, while camera-view pauses continue checking for a safe
 next cone. Once a next cone is accepted, its location controls the next movement
 burst instead of continuing the old blind turn. If no next cone is found within
 four wall-clock seconds, the program stops with `STOP - NEXT CONE NOT FOUND`;
-at about 33% duty that interval contains about 1.3 seconds of commanded motion.
+at 40% duty that interval contains about 1.6 seconds of commanded motion.
 
-The 33% setting means one-third commanded movement duty, not an exactly
-guaranteed one-third of continuous ground speed: motor startup and vehicle inertia also
-affect distance traveled. Verify the alternating `CREEP VIEW PAUSE - ALL STOP`
+The 40% setting is commanded movement duty, not an exactly guaranteed ground-
+speed percentage: motor startup and vehicle inertia also affect distance
+traveled. Verify the alternating `CREEP VIEW PAUSE - ALL STOP`
 and `AUTO MOVE` display with raised wheels before a bounded ground test with
 wide cone spacing. If the chassis turns opposite the printed direction, swap
 `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before

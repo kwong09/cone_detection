@@ -40,6 +40,7 @@ class CameraMotionSlalomNavigator:
     countersteer_frames: int = 12
     pass_confirmation_frames: int = 3
     visual_turn_confirmation_frames: int = 2
+    camera_offset_cm: float = 0.0
     direction_index: int = 0
     cones_passed: int = 0
     phase: str = "SEARCHING"
@@ -62,6 +63,7 @@ class CameraMotionSlalomNavigator:
     visual_turn_frames: int = 0
     turn_trigger_source: str | None = None
     passed_cone_side_to_ignore: str | None = None
+    corrected_center_x_ratio: float | None = None
 
     @property
     def direction(self) -> str:
@@ -90,6 +92,36 @@ class CameraMotionSlalomNavigator:
         self.current_target_height_ratio = None
         self.visual_turn_frames = 0
         self.turn_trigger_source = None
+        self.corrected_center_x_ratio = None
+
+    def _vehicle_center_x_ratio(
+        self,
+        detection: Detection,
+        calibration: CameraCalibration,
+        frame_shape: tuple[int, ...],
+        distance_cm: float | None = None,
+    ) -> float:
+        """Express cone position relative to the vehicle, not the camera.
+
+        ``camera_offset_cm`` is positive to the vehicle's right and negative
+        to its left. A left-mounted camera sees a vehicle-centerline cone to
+        the right of the image center, so its negative offset shifts that
+        observation back toward a corrected ratio of 0.5.
+        """
+        if distance_cm is None:
+            distance_cm = calibration.estimate_distance_cm(detection, frame_shape)
+        if not math.isfinite(distance_cm) or distance_cm <= 0.0:
+            return detection.center[0] / frame_shape[1]
+        scaled_focal_px = (
+            calibration.focal_length_px
+            * frame_shape[0]
+            / calibration.frame_height
+        )
+        corrected_x_px = (
+            detection.center[0]
+            + self.camera_offset_cm * scaled_focal_px / distance_cm
+        )
+        return corrected_x_px / frame_shape[1]
 
     def _relative_side_progress(self, center_x_ratio: float) -> float:
         if self.turn_start_x_ratio is None:
@@ -109,8 +141,17 @@ class CameraMotionSlalomNavigator:
         )
         return moved_across_image or in_expected_half
 
-    def _is_on_passed_cone_side(self, detection: Detection, frame_width: int) -> bool:
-        center_ratio = detection.center[0] / frame_width
+    def _is_on_passed_cone_side(
+        self,
+        detection: Detection,
+        calibration: CameraCalibration,
+        frame_shape: tuple[int, ...],
+    ) -> bool:
+        center_ratio = self._vehicle_center_x_ratio(
+            detection,
+            calibration,
+            frame_shape,
+        )
         if self.passed_cone_side_to_ignore == "LEFT":
             return center_ratio <= 0.45
         if self.passed_cone_side_to_ignore == "RIGHT":
@@ -175,7 +216,11 @@ class CameraMotionSlalomNavigator:
         detections = [
             detection
             for detection in detections
-            if not self._is_on_passed_cone_side(detection, frame_shape[1])
+            if not self._is_on_passed_cone_side(
+                detection,
+                calibration,
+                frame_shape,
+            )
         ]
         if not detections:
             return None
@@ -188,7 +233,12 @@ class CameraMotionSlalomNavigator:
             distance = calibration.estimate_distance_cm(detection, frame_shape)
             bottom_ratio = (detection.y + detection.height) / frame_shape[0]
             height_ratio = detection.height / frame_shape[0]
-            center_ratio = detection.center[0] / frame_shape[1]
+            center_ratio = self._vehicle_center_x_ratio(
+                detection,
+                calibration,
+                frame_shape,
+                distance,
+            )
             visually_close = (
                 detection.cropped
                 or distance <= self.hard_turn_cm
@@ -220,7 +270,14 @@ class CameraMotionSlalomNavigator:
         target = min(
             candidates,
             key=lambda item: (
-                abs(item.center[0] / frame_shape[1] - 0.5),
+                abs(
+                    self._vehicle_center_x_ratio(
+                        item,
+                        calibration,
+                        frame_shape,
+                    )
+                    - 0.5
+                ),
                 -(item.width * item.height),
             ),
         )
@@ -272,7 +329,13 @@ class CameraMotionSlalomNavigator:
             forward_detections = [
                 detection
                 for detection in detections
-                if 0.20 <= detection.center[0] / frame_shape[1] <= 0.80
+                if 0.20
+                <= self._vehicle_center_x_ratio(
+                    detection,
+                    calibration,
+                    frame_shape,
+                )
+                <= 0.80
             ]
             countersteer_target = self._select_new_target(
                 forward_detections,
@@ -324,7 +387,13 @@ class CameraMotionSlalomNavigator:
             # Treat it as conservatively close instead of delaying the turn.
             raw_distance = min(raw_distance, self.hard_turn_cm)
         self.raw_distance_cm = raw_distance
-        center_x_ratio = target.center[0] / frame_shape[1]
+        center_x_ratio = self._vehicle_center_x_ratio(
+            target,
+            calibration,
+            frame_shape,
+            raw_distance,
+        )
+        self.corrected_center_x_ratio = center_x_ratio
         height_ratio = target.height / frame_shape[0]
         self.current_target_height_ratio = height_ratio
         bottom_ratio = (target.y + target.height) / frame_shape[0]
@@ -416,7 +485,11 @@ class CameraMotionSlalomNavigator:
         if distance is None:
             return "STOP - DISTANCE UNAVAILABLE"
         distance_text = format_distance(distance)
-        center_x_ratio = self.current_target.center[0] / frame_shape[1]
+        center_x_ratio = (
+            self.corrected_center_x_ratio
+            if self.corrected_center_x_ratio is not None
+            else self.current_target.center[0] / frame_shape[1]
+        )
 
         if self.pass_armed:
             return f"HOLD {self.direction} - CLEARING CONE AT {distance_text}"
@@ -441,6 +514,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--display-width", type=int, default=1600)
     parser.add_argument("--min-area", type=int, default=450)
+    parser.add_argument(
+        "--robot-width-cm",
+        type=float,
+        default=30.48,
+        help="vehicle width; 30.48 cm is 12 inches",
+    )
+    parser.add_argument(
+        "--camera-from-left-cm",
+        type=float,
+        default=7.62,
+        help="camera center measured from the vehicle's left side; 7.62 cm is 3 inches",
+    )
     parser.add_argument("--cone-height-cm", type=float, default=30.5)
     parser.add_argument("--calibration-distance-cm", type=float, default=100.0)
     parser.add_argument(
@@ -474,6 +559,7 @@ def validate_args(args: argparse.Namespace) -> None:
         args.turn_start_cm,
         args.hard_turn_cm,
         args.pass_distance_cm,
+        args.robot_width_cm,
     ) <= 0:
         raise SystemExit("All physical measurements must be greater than zero")
     if not args.turn_start_cm > args.hard_turn_cm > args.pass_distance_cm:
@@ -482,6 +568,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("turn-start-height-ratio must be between 0 and 1")
     if args.countersteer_frames < 1:
         raise SystemExit("countersteer-frames must be at least 1")
+    if not 0.0 <= args.camera_from_left_cm <= args.robot_width_cm:
+        raise SystemExit("camera-from-left must be between zero and robot-width")
 
 
 def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
@@ -491,6 +579,9 @@ def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
         hard_turn_cm=args.hard_turn_cm,
         pass_distance_cm=args.pass_distance_cm,
         countersteer_frames=args.countersteer_frames,
+        camera_offset_cm=(
+            args.camera_from_left_cm - args.robot_width_cm / 2.0
+        ),
     )
 
 
