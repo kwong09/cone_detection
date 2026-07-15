@@ -450,11 +450,13 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertIn("COURSE COMPLETE", title)
 
     def test_second_pass_still_alternates_and_countersteers(self) -> None:
+        passed_cone = Detection(300, 300, 300, 400, 0.98)
         navigator = CameraMotionSlalomNavigator(
             max_cones=3,
             cones_passed=1,
             direction_index=0,
             countersteer_frames=12,
+            current_target=passed_cone,
         )
 
         navigator._finish_pass()
@@ -464,6 +466,7 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(navigator.direction_index, 1)
         self.assertEqual(navigator.countersteer_remaining, 12)
         self.assertTrue(navigator.awaiting_new_cone)
+        self.assertIs(navigator.passed_cone_reference, passed_cone)
 
     def test_countersteer_counts_only_frames_with_motor_output(self) -> None:
         calibration = CameraCalibration(
@@ -693,6 +696,36 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertTrue(navigator.close_cone_hazard)
         self.assertEqual(navigator.countersteer_remaining, 0)
         self.assertTrue(feedback.startswith("STOP"))
+
+    def test_search_ignores_known_passed_cone_and_acquires_distant_next(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        previous_passed_cone = Detection(320, 290, 290, 390, 0.98)
+        same_close_cone = Detection(300, 300, 300, 400, 0.98)
+        distant_next_cone = Detection(650, 300, 80, 100, 0.95)
+        navigator = CameraMotionSlalomNavigator(
+            phase="SEARCHING",
+            awaiting_new_cone=True,
+            passed_cone_reference=previous_passed_cone,
+        )
+
+        feedback = navigator.update(
+            [same_close_cone, distant_next_cone],
+            calibration,
+            FRAME_SHAPE,
+            motion_applied=False,
+        )
+
+        self.assertFalse(navigator.close_cone_hazard)
+        self.assertFalse(navigator.awaiting_new_cone)
+        self.assertIs(navigator.current_target, distant_next_cone)
+        self.assertIsNone(navigator.passed_cone_reference)
+        self.assertIn("FORWARD", feedback)
 
     def test_next_cone_found_while_stopped_controls_next_move(self) -> None:
         calibration = CameraCalibration(

@@ -64,6 +64,8 @@ class CameraMotionSlalomNavigator:
     turn_trigger_source: str | None = None
     passed_cone_side_to_ignore: str | None = None
     corrected_center_x_ratio: float | None = None
+    last_tracked_target: Detection | None = None
+    passed_cone_reference: Detection | None = None
 
     @property
     def direction(self) -> str:
@@ -93,6 +95,7 @@ class CameraMotionSlalomNavigator:
         self.visual_turn_frames = 0
         self.turn_trigger_source = None
         self.corrected_center_x_ratio = None
+        self.last_tracked_target = None
 
     def _vehicle_center_x_ratio(
         self,
@@ -193,6 +196,39 @@ class CameraMotionSlalomNavigator:
             return None
         return min(matches, key=lambda item: item[0])[1]
 
+    def _matches_recent_passed_cone(
+        self,
+        detection: Detection,
+        frame_shape: tuple[int, ...],
+    ) -> bool:
+        """Recognize the just-passed cone despite camera motion.
+
+        This check is used only for a visually close detection while the
+        navigator is waiting for the next, necessarily distant course cone.
+        Updating the reference on every match lets it follow the old cone as
+        the vehicle continues its gentle counterturn.
+        """
+        previous = self.passed_cone_reference
+        if previous is None:
+            return False
+        frame_height, frame_width = frame_shape[:2]
+        x_shift = abs(detection.center[0] - previous.center[0]) / frame_width
+        y_shift = abs(detection.center[1] - previous.center[1]) / frame_height
+        height_scale = max(
+            detection.height / max(previous.height, 1),
+            previous.height / max(detection.height, 1),
+        )
+        width_scale = max(
+            detection.width / max(previous.width, 1),
+            previous.width / max(detection.width, 1),
+        )
+        return (
+            x_shift <= 0.32
+            and y_shift <= 0.35
+            and height_scale <= 2.2
+            and width_scale <= 2.2
+        )
+
     def _select_new_target(
         self,
         detections: list[Detection],
@@ -210,20 +246,6 @@ class CameraMotionSlalomNavigator:
             # Once a next cone is accepted, follow its frame-to-frame motion
             # even if camera yaw carries it across the old cone's image half.
             return self._match_current_target(detections, frame_shape)
-
-        # While acquiring the next cone, exclude the image side occupied by
-        # the cone just passed. Target association takes over after acceptance.
-        detections = [
-            detection
-            for detection in detections
-            if not self._is_on_passed_cone_side(
-                detection,
-                calibration,
-                frame_shape,
-            )
-        ]
-        if not detections:
-            return None
 
         # The passed cone may remain in view while the camera countersteers.
         # A new course cone should be farther away, not clipped by the image
@@ -248,6 +270,20 @@ class CameraMotionSlalomNavigator:
                     and height_ratio >= self.turn_start_height_ratio
                 )
             )
+            if visually_close and self._matches_recent_passed_cone(
+                detection,
+                frame_shape,
+            ):
+                # This is the known cone that was just passed, not a new
+                # obstacle. Continue tracking its motion but never reacquire it.
+                self.passed_cone_reference = detection
+                continue
+            if self._is_on_passed_cone_side(
+                detection,
+                calibration,
+                frame_shape,
+            ):
+                continue
             if visually_close:
                 if 0.20 <= center_ratio <= 0.80:
                     # A close centered cone may be the old cone or an
@@ -282,9 +318,13 @@ class CameraMotionSlalomNavigator:
             ),
         )
         self.awaiting_new_cone = False
+        self.passed_cone_reference = None
         return target
 
     def _finish_pass(self) -> None:
+        self.passed_cone_reference = (
+            self.current_target or self.last_tracked_target
+        )
         self.cones_passed += 1
         if self.max_cones is not None and self.cones_passed >= self.max_cones:
             self.course_complete = True
@@ -292,6 +332,7 @@ class CameraMotionSlalomNavigator:
             self.countersteer_remaining = 0
             self.awaiting_new_cone = False
             self.passed_cone_side_to_ignore = None
+            self.passed_cone_reference = None
             self._reset_target_tracking()
             return
         self.direction_index = 1 - self.direction_index
@@ -381,6 +422,7 @@ class CameraMotionSlalomNavigator:
                 self.phase = "SEARCHING"
             return self.feedback(calibrated=True, frame_shape=frame_shape)
 
+        self.last_tracked_target = target
         raw_distance = calibration.estimate_distance_cm(target, frame_shape)
         if target.cropped:
             # Pixel height underestimates the full cone after frame clipping.

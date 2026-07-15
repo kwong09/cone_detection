@@ -311,12 +311,15 @@ is partly outside the image. It keeps the stricter tapered-shape requirements
 for small distant objects, while allowing a large cone low in the image to
 remain outlined as the robot approaches it.
 
-The dashboard outlines every cone accepted by the detector, even while the
-slalom navigator is temporarily ignoring a previously passed cone. If an
-ambiguous close cone remains near the forward center after countersteering, the
-autonomous program outlines it and stops the motors instead of guessing that it
-is the next cone and possibly counting the same cone twice. Reposition the robot
-at the course start and press `R` before starting another run.
+The dashboard outlines every cone accepted by the detector, including the cone
+just passed. The navigator now retains that cone's last size and position and
+continues matching it as camera motion moves it across the image. A matching
+close cone is ignored while a safe distant next cone is acquired; this prevents
+the expected old cone from causing `STOP - CLOSE CONE DETECTED WHILE SEARCHING`.
+An unknown close cone that does not match the tracked old cone still latches the
+stop, because blindly turning toward an unidentified nearby object could cause a
+collision. Reposition the robot at the course start and press `R` before
+starting another run after a genuine close-cone safety stop.
 
 If distant cones are ignored, reduce the minimum area, for example:
 
