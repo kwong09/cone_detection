@@ -37,7 +37,7 @@ class CameraMotionSlalomNavigator:
     visual_turn_min_bottom_ratio: float = 0.72
     hard_turn_cm: float = 80.0
     pass_distance_cm: float = 60.0
-    countersteer_frames: int = 32
+    countersteer_frames: int = 12
     pass_confirmation_frames: int = 3
     visual_turn_confirmation_frames: int = 2
     direction_index: int = 0
@@ -61,6 +61,7 @@ class CameraMotionSlalomNavigator:
     current_target_height_ratio: float | None = None
     visual_turn_frames: int = 0
     turn_trigger_source: str | None = None
+    passed_cone_side_to_ignore: str | None = None
 
     @property
     def direction(self) -> str:
@@ -108,6 +109,49 @@ class CameraMotionSlalomNavigator:
         )
         return moved_across_image or in_expected_half
 
+    def _is_on_passed_cone_side(self, detection: Detection, frame_width: int) -> bool:
+        center_ratio = detection.center[0] / frame_width
+        if self.passed_cone_side_to_ignore == "LEFT":
+            return center_ratio <= 0.45
+        if self.passed_cone_side_to_ignore == "RIGHT":
+            return center_ratio >= 0.55
+        return False
+
+    def _match_current_target(
+        self,
+        detections: list[Detection],
+        frame_shape: tuple[int, ...],
+    ) -> Detection | None:
+        """Keep tracking the same cone instead of switching to the largest red object."""
+        previous = self.current_target
+        if previous is None:
+            return detections[0] if detections else None
+
+        frame_height, frame_width = frame_shape[:2]
+        matches: list[tuple[float, Detection]] = []
+        for detection in detections:
+            x_shift = abs(detection.center[0] - previous.center[0]) / frame_width
+            y_shift = abs(detection.center[1] - previous.center[1]) / frame_height
+            height_scale = max(
+                detection.height / max(previous.height, 1),
+                previous.height / max(detection.height, 1),
+            )
+            width_scale = max(
+                detection.width / max(previous.width, 1),
+                previous.width / max(detection.width, 1),
+            )
+            if (
+                x_shift <= 0.25
+                and y_shift <= 0.35
+                and height_scale <= 2.8
+                and width_scale <= 2.8
+            ):
+                score = x_shift + 0.5 * y_shift + 0.05 * (height_scale + width_scale)
+                matches.append((score, detection))
+        if not matches:
+            return None
+        return min(matches, key=lambda item: item[0])[1]
+
     def _select_new_target(
         self,
         detections: list[Detection],
@@ -122,7 +166,19 @@ class CameraMotionSlalomNavigator:
         if not detections:
             return None
         if not self.awaiting_new_cone:
-            return detections[0]
+            # Once a next cone is accepted, follow its frame-to-frame motion
+            # even if camera yaw carries it across the old cone's image half.
+            return self._match_current_target(detections, frame_shape)
+
+        # While acquiring the next cone, exclude the image side occupied by
+        # the cone just passed. Target association takes over after acceptance.
+        detections = [
+            detection
+            for detection in detections
+            if not self._is_on_passed_cone_side(detection, frame_shape[1])
+        ]
+        if not detections:
+            return None
 
         # The passed cone may remain in view while the camera countersteers.
         # A new course cone should be farther away, not clipped by the image
@@ -178,9 +234,13 @@ class CameraMotionSlalomNavigator:
             self.phase = "COMPLETE"
             self.countersteer_remaining = 0
             self.awaiting_new_cone = False
+            self.passed_cone_side_to_ignore = None
             self._reset_target_tracking()
             return
         self.direction_index = 1 - self.direction_index
+        # After a RIGHT pass the old cone is on the left and the new direction
+        # is LEFT (and vice versa), so the new direction names the old side.
+        self.passed_cone_side_to_ignore = self.direction
         self.phase = "COUNTERSTEERING"
         self.countersteer_remaining = self.countersteer_frames
         self.awaiting_new_cone = True
@@ -191,6 +251,7 @@ class CameraMotionSlalomNavigator:
         detections: list[Detection],
         calibration: CameraCalibration | None,
         frame_shape: tuple[int, ...],
+        motion_applied: bool = True,
     ) -> str:
         if self.course_complete:
             return self.feedback(calibrated=calibration is not None, frame_shape=frame_shape)
@@ -199,18 +260,50 @@ class CameraMotionSlalomNavigator:
             self.current_target = None
             return "CALIBRATE DISTANCE: PLACE CONE AT MARK + PRESS C"
 
-        # Immediately after a pass, command the opposite turn and ignore the
-        # old cone while the robot-mounted camera rotates toward the next gate.
+        # Immediately after a pass, countersteer away from the old cone. Keep
+        # examining frames during this interval: a safe, distant next cone can
+        # end the blind countersteer early, and a close centered cone must stop
+        # the robot instead of being ignored.
+        countersteer_target: Detection | None = None
         if self.countersteer_remaining > 0:
-            self.countersteer_remaining -= 1
-            self.current_target = None
-            self.raw_distance_cm = None
-            self.smoothed_distance_cm = None
-            if self.countersteer_remaining == 0:
+            # Early acquisition is deliberately limited to the forward 60%
+            # of the image. A far version of the cone just passed can remain
+            # at an outer edge and must not be mistaken for the next cone.
+            forward_detections = [
+                detection
+                for detection in detections
+                if 0.20 <= detection.center[0] / frame_shape[1] <= 0.80
+            ]
+            countersteer_target = self._select_new_target(
+                forward_detections,
+                calibration,
+                frame_shape,
+            )
+            if self.close_cone_hazard:
+                self.countersteer_remaining = 0
                 self.phase = "SEARCHING"
-            return self.feedback(calibrated=True, frame_shape=frame_shape)
+                self.current_target = None
+                self.raw_distance_cm = None
+                self.smoothed_distance_cm = None
+                return self.feedback(calibrated=True, frame_shape=frame_shape)
+            if countersteer_target is not None:
+                self.countersteer_remaining = 0
+                self.phase = "SEARCHING"
+            else:
+                if motion_applied:
+                    self.countersteer_remaining -= 1
+                self.current_target = None
+                self.raw_distance_cm = None
+                self.smoothed_distance_cm = None
+                if self.countersteer_remaining > 0:
+                    return self.feedback(calibrated=True, frame_shape=frame_shape)
+                self.phase = "SEARCHING"
 
-        target = self._select_new_target(detections, calibration, frame_shape)
+        target = countersteer_target or self._select_new_target(
+            detections,
+            calibration,
+            frame_shape,
+        )
         self.current_target = target
         if target is None:
             self.raw_distance_cm = None
@@ -247,28 +340,14 @@ class CameraMotionSlalomNavigator:
         self.tallest_target_px = max(self.tallest_target_px, target.height)
 
         if self.phase == "APPROACHING":
-            visual_turn_candidate = (
-                bottom_ratio >= self.visual_turn_min_bottom_ratio
-                and height_ratio >= self.turn_start_height_ratio
-            )
-            if visual_turn_candidate:
-                self.visual_turn_frames += 1
-            else:
-                self.visual_turn_frames = 0
-
             distance_turn_ready = (
                 raw_distance <= self.turn_start_cm
                 or self.smoothed_distance_cm <= self.turn_start_cm
             )
-            visual_turn_ready = (
-                self.visual_turn_frames >= self.visual_turn_confirmation_frames
-            )
-            if distance_turn_ready or visual_turn_ready:
+            if distance_turn_ready:
                 self.phase = "TURNING"
                 self.turn_start_x_ratio = center_x_ratio
-                self.turn_trigger_source = (
-                    "DISTANCE" if distance_turn_ready else "CONE HEIGHT"
-                )
+                self.turn_trigger_source = "DISTANCE"
 
         if self.phase in {"TURNING", "PASSING"}:
             cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
@@ -342,24 +421,15 @@ class CameraMotionSlalomNavigator:
         if self.pass_armed:
             return f"HOLD {self.direction} - CLEARING CONE AT {distance_text}"
         if self.phase not in {"TURNING", "PASSING"} and distance > self.turn_start_cm:
-            if center_x_ratio < 0.44:
-                return f"ALIGN LEFT - CONE {distance_text}"
-            if center_x_ratio > 0.56:
-                return f"ALIGN RIGHT - CONE {distance_text}"
-            return f"FORWARD - CONE {distance_text}"
+            return (
+                f"FORWARD - CONE {distance_text} - "
+                f"TURN AT {self.turn_start_cm:.0f} cm"
+            )
 
         cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
-        if distance <= self.hard_turn_cm and not cleared_side:
-            return f"HARD {self.direction} - CONE {distance_text}"
         if cleared_side:
             return f"HOLD {self.direction} - CONE SLID {self.expected_cone_side}"
-        if self.turn_trigger_source == "CONE HEIGHT":
-            height_ratio = self.current_target_height_ratio or 0.0
-            return (
-                f"BEGIN {self.direction} TURN - CONE HEIGHT {height_ratio:.0%} "
-                f">= {self.turn_start_height_ratio:.0%}"
-            )
-        return f"BEGIN {self.direction} TURN - TRACK CONE MOTION"
+        return f"BEGIN SLOW {self.direction} TURN - TRACK CONE MOTION"
 
 
 def parse_args() -> argparse.Namespace:
@@ -381,11 +451,19 @@ def parse_args() -> argparse.Namespace:
         "--turn-start-height-ratio",
         type=float,
         default=0.30,
-        help="visual turn trigger as a fraction of image height",
+        help="close-cone safety threshold as a fraction of image height",
     )
-    parser.add_argument("--hard-turn-cm", type=float, default=80.0)
+    parser.add_argument(
+        "--hard-turn-cm",
+        type=float,
+        default=80.0,
+        help=(
+            "legacy option name for the close-cone clearance threshold; "
+            "it never increases motor speed"
+        ),
+    )
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=32)
+    parser.add_argument("--countersteer-frames", type=int, default=12)
     return parser.parse_args()
 
 

@@ -274,11 +274,19 @@ def parse_args() -> argparse.Namespace:
         "--turn-start-height-ratio",
         type=float,
         default=0.30,
-        help="visual turn trigger as a fraction of image height",
+        help="close-cone safety threshold as a fraction of image height",
     )
-    parser.add_argument("--hard-turn-cm", type=float, default=80.0)
+    parser.add_argument(
+        "--hard-turn-cm",
+        type=float,
+        default=80.0,
+        help=(
+            "legacy option name for the close-cone clearance threshold; "
+            "it never increases motor speed"
+        ),
+    )
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=32)
+    parser.add_argument("--countersteer-frames", type=int, default=12)
     return parser.parse_args()
 
 

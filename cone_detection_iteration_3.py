@@ -404,7 +404,7 @@ def make_dashboard(
         )
     else:
         motion_line = (
-            f"ROBOT {navigator.direction} -> CONE {navigator.expected_cone_side}   |   "
+            f"NAV PLAN: {navigator.direction} -> CONE {navigator.expected_cone_side}   |   "
             f"PHASE: {navigator.phase}   |   PASSED: {navigator.cones_passed}   |   "
             f"NEXT: {navigator.next_direction}"
         )

@@ -92,7 +92,8 @@ changing the camera, resolution, lens, camera mode, or digital crop.
 The default slalom timing is:
 
 - Begin the alternating turn at 130 cm.
-- Demand a hard turn at 80 cm if the cone has not moved to the passing side.
+- Use 80 cm only as a close-cone safety/clearance threshold; motor output does
+  not increase at this distance.
 - Arm pass detection at 60 cm once the cone is on the correct side.
 
 These values must be tuned at low speed for the final robot. Example:
@@ -110,12 +111,19 @@ left relative to that recorded position; a left turn expects the opposite.
 
 After the cleared cone reaches its closest point and begins getting smaller or
 farther away, the program counts the pass and immediately commands the opposite
-turn. It ignores detections for 12 frames while the camera rotates toward the
-next cone. This can be adjusted if the countersteer is too short or long:
+turn. It countersteers for up to 12 update frames while filtering out the close
+cone that was just passed; a safe, distant next cone can end that interval
+early. This can be adjusted if the countersteer is too short or long:
 
 ```bash
 python3 cone_detector.py --countersteer-frames 18
 ```
+
+In the combined motor program, this counter advances only on frames for which
+motor output was actually applied. Its all-stop camera-view frames do not use
+up the counter. A safe distant cone in the forward part of the image can also
+be accepted immediately, so the program does not have to finish a blind
+counterturn after it has already found the next target.
 
 ## Raspberry Pi 5 and Arducam
 
@@ -202,16 +210,17 @@ and quit. Losing camera frames, a normal remote-terminal disconnect, or
 pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
-The beginning-of-course configuration drives toward a centered cone, begins
-its alternating turn at 130 cm, or when a floor-level cone fills at least 30%
-of the image height for two consecutive frames, confirms the pass from cone
-motion, and repeats for exactly three cones. The visual-size trigger prevents
-an inaccurate saved distance calibration from continuing to command forward
-toward a visibly close cone:
+The beginning-of-course configuration drives straight toward the selected cone,
+begins its alternating turn only when calibrated range reaches 130 cm, confirms
+the pass from cone motion, and repeats for exactly three cones. Cone size remains
+a safety check while acquiring the next cone, but it no longer starts a normal
+turn early:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --display-width 1200 --max-cones 3 --drive
+  --vflip --display-width 1200 --max-cones 3 \
+  --creep-move-seconds 0.10 --creep-pause-seconds 0.30 \
+  --countersteer-frames 12 --search-timeout-seconds 4 --drive
 ```
 
 After the third confirmed pass, the program skips the normal countersteer,
@@ -224,18 +233,19 @@ For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --turn-test-mode --turn-outside-throttle 0.003 --ramp-step-us 3 --drive
+  --turn-test-mode --turn-outside-throttle 0.0015 --ramp-step-us 3 --drive
 ```
 
 Turn-test mode shows a large direction banner and deliberately suppresses
-forward motion while aligning to a far cone. A far centered cone leaves all
-four motors stopped; once the cone reaches the configured 130 cm turn threshold,
+forward motion during the approach phase. A far cone leaves all four motors
+stopped; once the cone reaches the configured 130 cm turn threshold,
 the navigator deliberately commands its planned slalom direction. A LEFT
 command runs only motors 3-4 while motors 1-2 jump immediately to the verified
 stop pulse; a RIGHT command runs only motors 1-2 while motors 3-4 stop. Positive
-commands still ramp up. This mode rejects `--headless` and is only for a chassis
-secured with every wheel raised; remove `--turn-test-mode` for an actual course
-run.
+commands use the same short creep cycle as a normal run. During each camera-view
+pause the banner explicitly says `ALL STOP` and shows which direction will be
+used next. This mode rejects `--headless` and is only for a chassis secured with
+every wheel raised; remove `--turn-test-mode` for an actual course run.
 
 When `--drive` is used, the program now initializes the PCA9685 and writes the
 verified stop pulse before loading calibration or starting the camera. This
@@ -244,20 +254,38 @@ present, but it is not a substitute for the physical motor-power disconnect:
 Python or hardware can still fail before that write occurs.
 
 The autonomous program deliberately uses a separate Pi calibration file so a
-calibration committed from another camera cannot start the robot. The initial
-settings now request the verified minimum continuous running pulse: 1460 us
-while moving straight, 1462 us on the outside motor pair while turning, and the
-1400 us stop pulse on the inside pair. A 3 us ramp step gives the camera more
-time to react during acceleration. All zero-output channels stop immediately,
-so an ordinary turn no longer leaves the inside wheels pushing the robot
-forward. The post-pass counterturn lasts 32 frames so the newly activated motor
-pair reaches its minimum moving pulse before the next centered cone can be
-accepted. The program also stops immediately on camera loss, stops after two
-seconds of searching without seeing the next cone, and stops on Ctrl+C. Once
-direction and stopping have been verified with raised wheels, test on the
-ground at low speed with wide cone spacing. If the chassis turns opposite the
-printed direction, swap `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the
-autonomous script before continuing.
+calibration committed from another camera cannot start the robot. Every new
+motion sequence starts with a 0.30-second all-stop camera observation. It then
+alternates 0.10 seconds of movement with 0.30 seconds at all-stop, for 25%
+commanded movement duty. The same gate limits forward driving, slalom turns,
+slalom turns, the post-pass counterturn, and the turn used to find the next
+cone. An independent stop deadline ends each movement burst even if the camera
+loop is delayed.
+
+During a movement burst, straight driving uses the verified 1460 us minimum
+moving pulse. A turn uses 1461 us on the outside motor pair and the 1400 us stop
+pulse on the inside pair. There is no hard-turn mode. Every turn, counterturn,
+and next-cone search uses the same gentle output, and no motor is ever commanded
+in reverse. During every camera-view pause, all four channels are
+at 1400 us. Moving channels jump directly to their minimum moving pulse because
+ramping from stop would consume most or all of a 0.10-second burst. Operator,
+camera-loss, close-cone, course-complete, and other zero-output stops bypass the
+cycle and stop immediately.
+
+After a confirmed pass, the direction alternates. The counterturn lasts up to
+12 applied-motion frames, while camera-view pauses continue checking for a safe
+next cone. Once a next cone is accepted, its location controls the next movement
+burst instead of continuing the old blind turn. If no next cone is found within
+four wall-clock seconds, the program stops with `STOP - NEXT CONE NOT FOUND`;
+at 25% duty that interval contains about one second of commanded motion.
+
+The 25% setting means quarter commanded movement duty, not an exactly guaranteed
+quarter of the previous ground speed: motor startup and vehicle inertia also
+affect distance traveled. Verify the alternating `CREEP VIEW PAUSE - ALL STOP`
+and `AUTO MOVE` display with raised wheels before a bounded ground test with
+wide cone spacing. If the chassis turns opposite the printed direction, swap
+`RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
+continuing.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.
