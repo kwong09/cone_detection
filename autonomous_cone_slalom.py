@@ -722,15 +722,15 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="stop and remain stopped after this many confirmed cone passes",
     )
-    parser.add_argument("--cruise-throttle", type=float, default=0.0001)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.0015)
+    parser.add_argument("--cruise-throttle", type=float, default=0.0015)
+    parser.add_argument("--turn-outside-throttle", type=float, default=0.003)
     parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
     parser.add_argument("--ramp-step-us", type=int, default=3)
     parser.add_argument(
         "--creep-move-seconds",
         type=float,
-        default=0.10,
+        default=0.15,
         help="seconds of minimum-pulse movement in each creep cycle",
     )
     parser.add_argument(

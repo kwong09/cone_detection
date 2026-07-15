@@ -57,23 +57,23 @@ def bare_drive() -> FourEscDrive:
 
 
 class ConeDetectionTests(unittest.TestCase):
-    def test_creep_gate_starts_stopped_then_moves_at_quarter_duty(self) -> None:
-        gate = MotionPulseGate(move_seconds=0.10, pause_seconds=0.30)
+    def test_creep_gate_starts_stopped_then_moves_at_one_third_duty(self) -> None:
+        gate = MotionPulseGate(move_seconds=0.15, pause_seconds=0.30)
         planned = DriveCommand("FORWARD", (0.0001, 0.0001, 0.0001, 0.0001))
 
         first = gate.limit(planned, 0.0)
         just_before_move = gate.limit(planned, 0.299)
         move = gate.limit(planned, 0.30)
         move_deadline = gate.move_deadline
-        just_before_pause = gate.limit(planned, 0.399)
-        next_pause = gate.limit(planned, 0.40)
+        just_before_pause = gate.limit(planned, 0.449)
+        next_pause = gate.limit(planned, 0.45)
 
-        self.assertEqual(gate.duty_cycle, 0.25)
+        self.assertAlmostEqual(gate.duty_cycle, 1 / 3)
         self.assertEqual(first.throttles, (0.0, 0.0, 0.0, 0.0))
         self.assertTrue(first.name.startswith("VIEW PAUSE"))
         self.assertEqual(just_before_move.throttles, (0.0, 0.0, 0.0, 0.0))
         self.assertEqual(move, planned)
-        self.assertEqual(move_deadline, 0.40)
+        self.assertAlmostEqual(move_deadline or 0.0, 0.45)
         self.assertEqual(just_before_pause, planned)
         self.assertEqual(next_pause.throttles, (0.0, 0.0, 0.0, 0.0))
 
@@ -736,20 +736,20 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(args.max_cones, 3)
         self.assertEqual(args.turn_start_height_ratio, 0.30)
         self.assertEqual(args.countersteer_frames, 12)
-        self.assertEqual(args.cruise_throttle, 0.0001)
-        self.assertEqual(args.turn_outside_throttle, 0.0015)
+        self.assertEqual(args.cruise_throttle, 0.0015)
+        self.assertEqual(args.turn_outside_throttle, 0.003)
         self.assertEqual(args.turn_inside_throttle, 0.0)
         self.assertEqual(args.ramp_step_us, 3)
-        self.assertEqual(args.creep_move_seconds, 0.10)
+        self.assertEqual(args.creep_move_seconds, 0.15)
         self.assertEqual(args.creep_pause_seconds, 0.30)
         self.assertEqual(args.search_timeout_seconds, 4.0)
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.cruise_throttle),
-            1460,
+            1461,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle),
-            1461,
+            1462,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle),
