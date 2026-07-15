@@ -221,7 +221,7 @@ For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --turn-test-mode --turn-outside-throttle 0.10 --ramp-step-us 10 --drive
+  --turn-test-mode --turn-outside-throttle 0.03 --ramp-step-us 5 --drive
 ```
 
 Turn-test mode shows a large direction banner and deliberately suppresses
@@ -242,14 +242,15 @@ Python or hardware can still fail before that write occurs.
 
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. The initial
-settings now use 10% forward throttle, 12% outside-turn throttle, 4% inside-turn
-throttle, and a gentler 10 us ramp step so the camera has more time to react.
+settings now use 2% forward throttle, 3% outside-turn throttle, 1% inside-turn
+throttle, and a gentler 5 us ramp step so the camera has more time to react.
 The program also stops immediately on camera loss, stops after two seconds of
-searching without seeing the next cone, and stops on Ctrl+C. Once direction and
-stopping have been verified with raised wheels, test on the ground at low speed
-with wide cone spacing. If the chassis turns opposite the printed direction,
-swap `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
-continuing.
+searching without seeing the next cone, and stops on Ctrl+C. Every command that
+sets all four motors to zero bypasses the acceleration ramp and writes the stop
+pulse immediately. Once direction and stopping have been verified with raised
+wheels, test on the ground at low speed with wide cone spacing. If the chassis
+turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
+`LEFT_TURN_MOTORS` in the autonomous script before continuing.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.

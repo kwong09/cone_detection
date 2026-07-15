@@ -234,8 +234,8 @@ def apply_drive_output(
     args: argparse.Namespace,
     course_complete: bool,
 ) -> None:
-    """Apply one command, bypassing all ramps for the completed-course stop."""
-    if course_complete:
+    """Apply one command, bypassing all ramps for every all-motor stop."""
+    if course_complete or not any(command.throttles):
         drive.stop(immediate=True)
         return
     drive.command(
@@ -489,12 +489,12 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="stop and remain stopped after this many confirmed cone passes",
     )
-    parser.add_argument("--cruise-throttle", type=float, default=0.10)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.12)
-    parser.add_argument("--turn-inside-throttle", type=float, default=0.04)
+    parser.add_argument("--cruise-throttle", type=float, default=0.02)
+    parser.add_argument("--turn-outside-throttle", type=float, default=0.03)
+    parser.add_argument("--turn-inside-throttle", type=float, default=0.01)
     parser.add_argument("--hard-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
-    parser.add_argument("--ramp-step-us", type=int, default=10)
+    parser.add_argument("--ramp-step-us", type=int, default=5)
     parser.add_argument("--camera-loss-frames", type=int, default=3)
     parser.add_argument(
         "--search-timeout-seconds",

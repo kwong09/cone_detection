@@ -70,6 +70,28 @@ class ConeDetectionTests(unittest.TestCase):
 
         self.assertEqual(events, [("stop", True)])
 
+    def test_zero_safety_command_bypasses_ramp_and_stops_immediately(self) -> None:
+        events: list[object] = []
+
+        class FakeDrive:
+            def stop(self, immediate: bool = False) -> None:
+                events.append(("stop", immediate))
+
+            def command(self, *_args: object, **_kwargs: object) -> None:
+                events.append("command")
+
+            def step(self) -> None:
+                events.append("step")
+
+        apply_drive_output(
+            FakeDrive(),  # type: ignore[arg-type]
+            DriveCommand("STOP - CLOSE CONE", (0.0, 0.0, 0.0, 0.0)),
+            Namespace(turn_test_mode=False),
+            course_complete=False,
+        )
+
+        self.assertEqual(events, [("stop", True)])
+
     def test_third_pass_latches_complete_without_countersteering(self) -> None:
         navigator = CameraMotionSlalomNavigator(
             max_cones=3,
@@ -116,15 +138,27 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(navigator.countersteer_remaining, 12)
         self.assertTrue(navigator.awaiting_new_cone)
 
-    def test_three_cone_course_uses_slower_defaults(self) -> None:
+    def test_three_cone_course_uses_ultra_slow_defaults(self) -> None:
         with patch("sys.argv", ["combined_cone_detection_slalom.py"]):
             args = parse_autonomous_args()
 
         self.assertEqual(args.max_cones, 3)
-        self.assertEqual(args.cruise_throttle, 0.10)
-        self.assertEqual(args.turn_outside_throttle, 0.12)
-        self.assertEqual(args.turn_inside_throttle, 0.04)
-        self.assertEqual(args.ramp_step_us, 10)
+        self.assertEqual(args.cruise_throttle, 0.02)
+        self.assertEqual(args.turn_outside_throttle, 0.03)
+        self.assertEqual(args.turn_inside_throttle, 0.01)
+        self.assertEqual(args.ramp_step_us, 5)
+        self.assertEqual(
+            FourEscDrive._pulse_for_throttle(0, args.cruise_throttle),
+            1473,
+        )
+        self.assertEqual(
+            FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle),
+            1479,
+        )
+        self.assertEqual(
+            FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle),
+            1466,
+        )
         self.assertEqual(new_navigator(args).max_cones, 3)
         self.assertIsNone(new_preview_navigator(args).max_cones)
 
