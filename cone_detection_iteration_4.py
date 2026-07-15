@@ -39,9 +39,7 @@ class CameraMotionSlalomNavigator:
     pass_distance_cm: float = 60.0
     countersteer_frames: int = 12
     pass_confirmation_frames: int = 3
-    visual_turn_confirmation_frames: int = 2
-    emergency_turn_min_height_ratio: float = 0.36
-    emergency_turn_min_bottom_ratio: float = 0.76
+    target_confirmation_frames: int = 2
     camera_offset_cm: float = 0.0
     direction_index: int = 0
     cones_passed: int = 0
@@ -62,7 +60,7 @@ class CameraMotionSlalomNavigator:
     max_cones: int | None = None
     course_complete: bool = False
     current_target_height_ratio: float | None = None
-    visual_turn_frames: int = 0
+    target_detection_frames: int = 0
     turn_trigger_source: str | None = None
     passed_cone_side_to_ignore: str | None = None
     corrected_center_x_ratio: float | None = None
@@ -98,7 +96,7 @@ class CameraMotionSlalomNavigator:
         self.missing_frames = 0
         self.close_cone_hazard = False
         self.current_target_height_ratio = None
-        self.visual_turn_frames = 0
+        self.target_detection_frames = 0
         self.turn_trigger_source = None
         self.corrected_center_x_ratio = None
         self.last_tracked_target = None
@@ -505,7 +503,7 @@ class CameraMotionSlalomNavigator:
             self.raw_distance_cm = None
             self.current_target_height_ratio = None
             if self.phase == "APPROACHING":
-                self.visual_turn_frames = 0
+                self.target_detection_frames = 0
             if self.pass_armed:
                 self.missing_frames += 1
                 if self.missing_frames >= self.pass_confirmation_frames:
@@ -543,32 +541,24 @@ class CameraMotionSlalomNavigator:
         self.tallest_target_px = max(self.tallest_target_px, target.height)
 
         if self.phase == "APPROACHING":
-            # Calibrated range remains the normal turn trigger. If that
-            # calibration is badly wrong, do not continue driving into a cone
-            # that is unmistakably large and low in the camera view. Requiring
-            # two consecutive frames and stricter visual limits than the
-            # general close-cone safety check avoids the former early turns.
-            visual_turn_candidate = (
-                bottom_ratio >= self.emergency_turn_min_bottom_ratio
-                and height_ratio >= self.emergency_turn_min_height_ratio
-            )
-            if visual_turn_candidate:
-                self.visual_turn_frames += 1
-            else:
-                self.visual_turn_frames = 0
+            # Begin turning as soon as the detector confirms the same target
+            # on two consecutive frames. The motion gate starts with a 0.30 s
+            # camera-only pause, so a real cone normally reaches TURNING before
+            # the first motor burst rather than receiving another forward push.
+            self.target_detection_frames += 1
 
             distance_turn_ready = (
                 raw_distance <= self.turn_start_cm
                 or self.smoothed_distance_cm <= self.turn_start_cm
             )
-            visual_turn_ready = (
-                self.visual_turn_frames >= self.visual_turn_confirmation_frames
+            confirmed_detection_turn_ready = (
+                self.target_detection_frames >= self.target_confirmation_frames
             )
-            if distance_turn_ready or visual_turn_ready:
+            if distance_turn_ready or confirmed_detection_turn_ready:
                 self.phase = "TURNING"
                 self.turn_start_x_ratio = center_x_ratio
                 self.turn_trigger_source = (
-                    "DISTANCE" if distance_turn_ready else "CLOSE CONE BACKUP"
+                    "DISTANCE" if distance_turn_ready else "CONFIRMED DETECTION"
                 )
 
         if self.phase in {"TURNING", "PASSING"}:
@@ -652,6 +642,11 @@ class CameraMotionSlalomNavigator:
         if self.pass_armed:
             return f"HOLD {self.direction} - CLEARING CONE AT {distance_text}"
         if self.phase not in {"TURNING", "PASSING"} and distance > self.turn_start_cm:
+            if self.target_detection_frames > 0:
+                return (
+                    "STOP - CONFIRMING CONE DETECTION "
+                    f"{self.target_detection_frames}/{self.target_confirmation_frames}"
+                )
             return (
                 f"FORWARD - CONE {distance_text} - "
                 f"TURN AT {self.turn_start_cm:.0f} cm"
@@ -660,8 +655,8 @@ class CameraMotionSlalomNavigator:
         cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
         if cleared_side:
             return f"HOLD {self.direction} - CONE SLID {self.expected_cone_side}"
-        if self.turn_trigger_source == "CLOSE CONE BACKUP":
-            return f"BEGIN SLOW {self.direction} TURN - CLOSE CONE VISUAL BACKUP"
+        if self.turn_trigger_source == "CONFIRMED DETECTION":
+            return f"BEGIN SLOW {self.direction} TURN - CONE DETECTION CONFIRMED"
         return f"BEGIN SLOW {self.direction} TURN - TRACK CONE MOTION"
 
 

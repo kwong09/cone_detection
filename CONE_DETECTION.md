@@ -91,7 +91,9 @@ changing the camera, resolution, lens, camera mode, or digital crop.
 
 The default slalom timing is:
 
-- Begin the alternating turn at 160 cm.
+- Begin the alternating turn after two consecutive matched cone detections.
+- Also allow calibrated range at 160 cm to start the turn immediately without
+  waiting for the second frame.
 - Use 80 cm only as a close-cone safety/clearance threshold; motor output does
   not increase at this distance.
 - Arm pass detection at 60 cm once the cone is on the correct side.
@@ -210,21 +212,27 @@ and quit. Losing camera frames, a normal remote-terminal disconnect, or
 pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
-The beginning-of-course configuration drives straight toward the selected cone,
-begins its alternating turn when calibrated range reaches 160 cm, confirms
-the pass from cone motion, and repeats for exactly three cones. Cone size remains
-a safety check while acquiring the next cone, but it no longer starts a normal
-turn early:
+The beginning-of-course configuration confirms the selected cone across two
+consecutive camera frames, immediately begins its alternating turn, confirms
+the pass from cone motion, and repeats for exactly three cones. The initial
+0.30-second camera-only pause normally confirms the target before the first
+motor burst. If the first detection arrives during a movement window, all four
+motors stop while the second frame confirms it, preventing another straight
+creep toward the cone:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
   --vflip --display-width 1200 --max-cones 3 \
   --robot-width-cm 30.48 --camera-from-left-cm 7.62 \
   --turn-start-cm 160 \
-  --turn-outside-throttle 0.015 --turn-inside-throttle 0 \
+  --turn-side-throttle 0.015 --opposite-side-throttle 0 \
   --creep-move-seconds 0.20 --creep-pause-seconds 0.30 \
   --countersteer-frames 12 --search-timeout-seconds 4 --drive
 ```
+
+The older `--turn-outside-throttle` and `--turn-inside-throttle` names remain
+accepted as compatibility aliases, but the side-based names match the actual
+front/back motor pairs more clearly.
 
 After the third confirmed pass, the program skips the normal countersteer,
 commands every motor directly to the stop pulse, and remains stopped even if
@@ -236,15 +244,15 @@ For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --turn-test-mode --turn-outside-throttle 0.0045 --ramp-step-us 3 --drive
+  --turn-test-mode --turn-side-throttle 0.015 --ramp-step-us 3 --drive
 ```
 
 Turn-test mode shows a large direction banner and deliberately suppresses
-forward motion during the approach phase. A far cone leaves all four motors
-stopped; once the cone reaches the configured 160 cm turn threshold,
-the navigator deliberately commands its planned slalom direction. A LEFT
-command runs only motors 3-4 while motors 1-2 jump immediately to the verified
-stop pulse; a RIGHT command runs only motors 1-2 while motors 3-4 stop. Positive
+forward motion while the detector confirms a cone. A LEFT command runs only
+the physical left-front and left-rear motors on channels 1-2 while channels
+3-4 jump immediately to the verified stop pulse. A RIGHT command runs only
+the physical right-front and right-rear motors on channels 3-4 while channels
+1-2 stop. Positive
 commands use the same short creep cycle as a normal run. During each camera-view
 pause the banner explicitly says `ALL STOP` and shows which direction will be
 used next. This mode rejects `--headless` and is only for a chassis secured with
@@ -266,10 +274,10 @@ cone. An independent stop deadline ends each movement burst even if the camera
 loop is delayed.
 
 During a movement burst, straight driving uses a 1462 us low moving pulse. A
-turn uses 1470 us on the outside motor pair and the 1400 us stop
-pulse on the inside pair. The extra turn-only torque lets two powered wheels
-drag the two stopped inside wheels; straight speed is unchanged. There is no
-hard-turn mode. Every turn, counterturn,
+turn uses 1470 us on the two motors on the requested physical side and the
+1400 us stop pulse on the opposite side. The extra turn-only torque lets two
+powered wheels drag the two stopped wheels; straight speed is unchanged. There
+is no hard-turn mode. Every turn, counterturn,
 and next-cone search uses the same gentle output, and no motor is ever commanded
 in reverse. During every camera-view pause, all four channels are
 at 1400 us. Moving channels jump directly to their minimum moving pulse because
@@ -294,16 +302,15 @@ The 40% setting is commanded movement duty, not an exactly guaranteed ground-
 speed percentage: motor startup and vehicle inertia also affect distance
 traveled. Verify the alternating `CREEP VIEW PAUSE - ALL STOP`
 and `AUTO MOVE` display with raised wheels before a bounded ground test with
-wide cone spacing. If the chassis turns opposite the printed direction, swap
-`RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the autonomous script before
-continuing.
+wide cone spacing. The configured mapping is LEFT = channels 1-2 and RIGHT =
+channels 3-4, matching the physical front/back motor pairs requested for this
+chassis.
 
-Calibrated distance is the normal turn trigger. As a clearance backup, two
-consecutive frames showing a cone at least 36% of the image height with its
-base in the bottom 24% start the same slow turn even if the calibration still
-reports a long distance. The dashboard labels this `CLOSE CONE VISUAL BACKUP`.
-These limits remain stricter than the earlier 30%-height trigger, while leaving
-room for the wheels to arc around the cone.
+Two consecutive matched cone detections start the turn regardless of the range
+estimate or apparent cone size. The dashboard labels this `CONE DETECTION
+CONFIRMED`. A single detection frame cannot move the navigator into TURNING,
+which filters a one-frame false positive while still starting far earlier than
+the previous close-cone thresholds.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.

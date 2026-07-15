@@ -2,8 +2,8 @@
 """Drive the four-ESC robot through an alternating red-cone slalom.
 
 This combines the team's PCA9685 motor calibration with the Raspberry Pi 5 /
-Arducam detector and the camera-motion-aware navigator.  Motor output remains
-forward-only: turns are made by slowing the motors on the inside of the turn.
+Arducam detector and the camera-motion-aware navigator. Motor output remains
+forward-only: turns run only the front/back motors on the requested side.
 
 Keep the wheels raised for the first test and keep a physical kill switch in
 reach.  Camera loss, missing calibration, Ctrl+C, and normal exit all command
@@ -45,10 +45,11 @@ MOTOR_START_US = (1460, 1460, 1460, 1460)
 # Preserve that tested electrical limit until each ESC has been calibrated.
 MOTOR_MAX_US = (2100, 2100, 2100, 2100)
 
-# In the supplied controller, Right activates 1-2 and Left activates 3-4.
-# These names describe the requested turn, not assumed chassis wiring.
-RIGHT_TURN_MOTORS = (0, 1)
-LEFT_TURN_MOTORS = (2, 3)
+# PCA9685 channels 1-2 are the left-front/left-rear motors, while channels
+# 3-4 are right-front/right-rear. Each requested turn runs only the two motors
+# on that same physical side, matching the chassis test.
+LEFT_TURN_MOTORS = (0, 1)
+RIGHT_TURN_MOTORS = (2, 3)
 WINDOW_NAME = "Autonomous Cone Slalom - Live Camera"
 
 
@@ -399,7 +400,7 @@ def apply_drive_output(
         return False
     drive.command(
         command.throttles,
-        # Deceleration is never ramped. This makes the stopped inside motor
+        # Deceleration is never ramped. This makes the stopped opposite-side
         # pair create a real turn instead of continuing to push forward.
         immediate_zero=True,
         immediate_positive=getattr(args, "creep_pause_seconds", 0.0) > 0.0,
@@ -411,7 +412,7 @@ def apply_drive_output(
 
 
 def choose_drive_command(navigator: object, frame_width: int, args: argparse.Namespace) -> DriveCommand:
-    """Drive straight to the turn distance, then use one gentle turn speed."""
+    """Turn on a confirmed cone using only the requested physical side."""
     stop = side_command("STOP", 0.0, 0.0)
     target = navigator.current_target
 
@@ -443,22 +444,26 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     elif navigator.phase in {"TURNING", "PASSING"}:
         direction = navigator.direction
     else:
-        # Do not steer early based only on the cone's image position. The
-        # navigator enters TURNING at the configured distance, so approach is
-        # a slow straight-ahead motion.
+        # The navigator requires two matching detection frames before entering
+        # TURNING. Stop during that confirmation frame so an active movement
+        # window cannot add another straight creep toward the cone.
+        if getattr(navigator, "target_detection_frames", 0) > 0:
+            return side_command("STOP - CONFIRM CONE", 0.0, 0.0)
         if getattr(args, "turn_test_mode", False):
             return side_command("APPROACH - NO TURN", 0.0, 0.0)
         return side_command("FORWARD", args.cruise_throttle, args.cruise_throttle)
 
     # There is deliberately no hard-turn branch. Turning, counterturning, and
-    # searching all use this same low forward-only outside-pair output; the
-    # inside pair is stopped and is never commanded in reverse.
-    inside = 0.0 if getattr(args, "turn_test_mode", False) else args.turn_inside_throttle
-    outside = args.turn_outside_throttle
+    # searching all use this same low forward-only output on the requested
+    # physical side; the opposite side is stopped and never driven in reverse.
+    opposite_side = (
+        0.0 if getattr(args, "turn_test_mode", False) else args.turn_inside_throttle
+    )
+    requested_side = args.turn_outside_throttle
     name = f"CLEAR {direction}" if clearance else direction
     if direction == "RIGHT":
-        return side_command(name, outside, inside)
-    return side_command(name, inside, outside)
+        return side_command(name, requested_side, opposite_side)
+    return side_command(name, opposite_side, requested_side)
 
 
 def enforce_next_cone_timeout(
@@ -498,7 +503,7 @@ def turn_test_banner(
     if paused:
         return (
             "TURN TEST - PAUSED",
-            "LEFT = M3-4  |  RIGHT = M1-2  |  FAR CENTER = ALL STOP",
+            "LEFT = M1-2  |  RIGHT = M3-4  |  UNCONFIRMED = ALL STOP",
             (80, 230, 255),
         )
     if command.name.startswith("VIEW PAUSE - NEXT "):
@@ -511,13 +516,13 @@ def turn_test_banner(
     if command.name in {"LEFT", "CLEAR LEFT"}:
         return (
             "<<<  TURN TEST: LEFT",
-            "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
+            "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",
             (255, 220, 0),
         )
     if command.name in {"RIGHT", "CLEAR RIGHT"}:
         return (
             "TURN TEST: RIGHT  >>>",
-            "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",
+            "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
             (0, 165, 255),
         )
     if command.name == "APPROACH - NO TURN":
@@ -707,7 +712,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "raised-wheel test only: show a large LEFT/RIGHT banner and stop "
-            "the inside motor pair during turns"
+            "the opposite-side motor pair during turns"
         ),
     )
     parser.add_argument("--cone-height-cm", type=float, default=30.5)
@@ -726,7 +731,7 @@ def parse_args() -> argparse.Namespace:
         default=0.30,
         help=(
             "close-cone safety threshold as a fraction of image height; "
-            "normal turns begin from calibrated distance only"
+            "normal turns begin after two matching cone detections"
         ),
     )
     parser.add_argument(
@@ -753,15 +758,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cruise-throttle", type=float, default=0.003)
     parser.add_argument(
+        "--turn-side-throttle",
         "--turn-outside-throttle",
+        dest="turn_outside_throttle",
         type=float,
         default=0.015,
         help=(
-            "forward-only outside-pair turn power; the higher default supplies "
-            "enough torque for two motors to drag the stopped inside wheels"
+            "forward-only requested-side turn power; the higher default supplies "
+            "enough torque for two motors to drag the stopped opposite wheels"
         ),
     )
-    parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
+    parser.add_argument(
+        "--opposite-side-throttle",
+        "--turn-inside-throttle",
+        dest="turn_inside_throttle",
+        type=float,
+        default=0.0,
+        help="opposite-side power during a turn; zero keeps both wheels stopped",
+    )
     parser.add_argument("--arm-seconds", type=float, default=5.0)
     parser.add_argument("--ramp-step-us", type=int, default=3)
     parser.add_argument(
@@ -797,15 +811,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     validate_camera_args(args)
-    for name in ("cruise_throttle", "turn_outside_throttle", "turn_inside_throttle"):
+    throttle_options = {
+        "cruise_throttle": "cruise-throttle",
+        "turn_outside_throttle": "turn-side-throttle",
+        "turn_inside_throttle": "opposite-side-throttle",
+    }
+    for name, option in throttle_options.items():
         if not 0.0 <= getattr(args, name) <= 0.25:
-            raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 0.25")
+            raise SystemExit(f"--{option} must be between 0 and 0.25")
     if not (
         args.turn_outside_throttle >= args.cruise_throttle
         and args.turn_outside_throttle > args.turn_inside_throttle
     ):
         raise SystemExit(
-            "Throttle settings must satisfy: outside >= cruise and outside > inside"
+            "Throttle settings must satisfy: requested side >= cruise and "
+            "requested side > opposite side"
         )
     if (
         args.ramp_step_us < 1
@@ -825,7 +845,7 @@ def main() -> None:
     if args.turn_test_mode and args.headless:
         raise SystemExit("Turn-test mode requires the live dashboard; remove --headless.")
     if args.turn_test_mode and args.turn_outside_throttle <= 0.0:
-        raise SystemExit("Turn-test mode needs --turn-outside-throttle greater than zero.")
+        raise SystemExit("Turn-test mode needs --turn-side-throttle greater than zero.")
 
     drive: FourEscDrive | None = None
     camera = None
@@ -884,8 +904,8 @@ def main() -> None:
         print(
             "Minimum-speed pulses: "
             f"forward {FourEscDrive._pulse_for_throttle(0, args.cruise_throttle)} us, "
-            f"turn outside {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
-            f"turn inside {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
+            f"turn side {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
+            f"opposite side {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
         )
         camera_offset_cm = args.camera_from_left_cm - args.robot_width_cm / 2.0
         if camera_offset_cm < 0.0:
@@ -907,7 +927,7 @@ def main() -> None:
         )
         if args.turn_test_mode:
             print(
-                "TURN TEST MODE: LEFT runs motors 3-4, RIGHT runs motors 1-2, "
+                "TURN TEST MODE: LEFT runs motors 1-2, RIGHT runs motors 3-4, "
                 "and the opposite pair stops. Raised wheels only."
             )
 

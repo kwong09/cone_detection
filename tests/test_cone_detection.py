@@ -153,7 +153,7 @@ class ConeDetectionTests(unittest.TestCase):
 
         self.assertEqual(events, [("stop", True)])
 
-    def test_turn_command_stops_inside_pair_immediately(self) -> None:
+    def test_turn_command_stops_opposite_pair_immediately(self) -> None:
         events: list[object] = []
 
         class FakeDrive:
@@ -256,7 +256,7 @@ class ConeDetectionTests(unittest.TestCase):
                 self.assertEqual(gate.limit(planned, now), planned)
                 self.assertAlmostEqual(gate.move_deadline or 0.0, expected_deadline)
 
-    def test_visual_height_does_not_turn_before_ideal_distance(self) -> None:
+    def test_confirmed_cone_detection_starts_turn_before_forward_motion(self) -> None:
         calibration = CameraCalibration(
             focal_length_px=2000.0,
             cone_height_cm=30.5,
@@ -274,12 +274,25 @@ class ConeDetectionTests(unittest.TestCase):
             [centered_close], calibration, FRAME_SHAPE
         )
         self.assertEqual(navigator.phase, "APPROACHING")
-        self.assertIn("FORWARD", first_feedback)
+        self.assertIn("CONFIRMING CONE", first_feedback)
+        confirmation_command = choose_drive_command(
+            navigator,
+            FRAME_SHAPE[1],
+            Namespace(
+                max_cones=3,
+                cruise_throttle=0.0001,
+                turn_outside_throttle=0.0015,
+                turn_inside_throttle=0.0,
+                turn_test_mode=False,
+            ),
+        )
+        self.assertEqual(confirmation_command.name, "STOP - CONFIRM CONE")
+        self.assertEqual(confirmation_command.throttles, (0.0, 0.0, 0.0, 0.0))
 
         second_feedback = navigator.update([centered_close], calibration, FRAME_SHAPE)
-        self.assertEqual(navigator.phase, "APPROACHING")
-        self.assertIsNone(navigator.turn_trigger_source)
-        self.assertIn("FORWARD", second_feedback)
+        self.assertEqual(navigator.phase, "TURNING")
+        self.assertEqual(navigator.turn_trigger_source, "CONFIRMED DETECTION")
+        self.assertIn("CONE DETECTION CONFIRMED", second_feedback)
         self.assertFalse(navigator.pass_armed)
         self.assertEqual(navigator.cones_passed, 0)
 
@@ -294,8 +307,8 @@ class ConeDetectionTests(unittest.TestCase):
                 turn_test_mode=False,
             ),
         )
-        self.assertEqual(command.name, "FORWARD")
-        self.assertEqual(command.throttles, (0.0001,) * 4)
+        self.assertEqual(command.name, "RIGHT")
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.0015, 0.0015))
 
     def test_turn_starts_only_at_ideal_distance(self) -> None:
         calibration = CameraCalibration(
@@ -316,7 +329,7 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertEqual(navigator.turn_trigger_source, "DISTANCE")
         self.assertIn("BEGIN SLOW RIGHT TURN", feedback)
 
-    def test_close_visual_backup_turns_when_calibrated_range_is_wrong(self) -> None:
+    def test_confirmed_detection_turns_when_calibrated_range_is_wrong(self) -> None:
         calibration = CameraCalibration(
             focal_length_px=5000.0,
             cone_height_cm=30.5,
@@ -324,24 +337,24 @@ class ConeDetectionTests(unittest.TestCase):
             frame_height=720,
             calibration_distance_cm=100.0,
         )
-        # This cone is large enough to need turning clearance, but it is not
-        # nearly touching the bottom of the camera view.
-        unmistakably_close = Detection(470, 280, 340, 270, 0.98)
+        # Even a small distant-looking target starts the planned side turn
+        # after it remains matched for two frames.
+        unmistakably_close = Detection(590, 300, 100, 100, 0.98)
         navigator = CameraMotionSlalomNavigator(turn_start_cm=160.0)
 
         first_feedback = navigator.update(
             [unmistakably_close], calibration, FRAME_SHAPE
         )
         self.assertEqual(navigator.phase, "APPROACHING")
-        self.assertIn("FORWARD", first_feedback)
+        self.assertIn("CONFIRMING CONE", first_feedback)
         self.assertGreater(navigator.raw_distance_cm or 0.0, 160.0)
 
         second_feedback = navigator.update(
             [unmistakably_close], calibration, FRAME_SHAPE
         )
         self.assertEqual(navigator.phase, "TURNING")
-        self.assertEqual(navigator.turn_trigger_source, "CLOSE CONE BACKUP")
-        self.assertIn("CLOSE CONE VISUAL BACKUP", second_feedback)
+        self.assertEqual(navigator.turn_trigger_source, "CONFIRMED DETECTION")
+        self.assertIn("CONE DETECTION CONFIRMED", second_feedback)
 
         command = choose_drive_command(
             navigator,
@@ -355,9 +368,9 @@ class ConeDetectionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(command.name, "RIGHT")
-        self.assertEqual(command.throttles, (0.015, 0.015, 0.0, 0.0))
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.015, 0.015))
 
-    def test_visual_size_never_bypasses_distance_at_any_resolution(self) -> None:
+    def test_single_detection_frame_never_starts_turn_at_any_resolution(self) -> None:
         calibration = CameraCalibration(
             focal_length_px=2000.0,
             cone_height_cm=30.5,
@@ -381,7 +394,6 @@ class ConeDetectionTests(unittest.TestCase):
                     turn_start_height_ratio=0.30
                 )
 
-                navigator.update([target], calibration, frame_shape)
                 navigator.update([target], calibration, frame_shape)
 
                 self.assertEqual(navigator.phase, "APPROACHING")
@@ -710,7 +722,8 @@ class ConeDetectionTests(unittest.TestCase):
         )
 
         self.assertIs(navigator.current_target, shifted_same_cone)
-        self.assertEqual(navigator.phase, "APPROACHING")
+        self.assertEqual(navigator.phase, "TURNING")
+        self.assertEqual(navigator.turn_trigger_source, "CONFIRMED DETECTION")
 
     def test_countersteer_stops_for_ambiguous_close_centered_cone(self) -> None:
         calibration = CameraCalibration(
@@ -782,7 +795,7 @@ class ConeDetectionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(command.name, "CLEAR RIGHT")
-        self.assertEqual(command.throttles, (0.0045, 0.0045, 0.0, 0.0))
+        self.assertEqual(command.throttles, (0.0, 0.0, 0.0045, 0.0045))
 
         # A brief detector dropout must not immediately switch back to forward.
         for _ in range(7):
@@ -802,7 +815,7 @@ class ConeDetectionTests(unittest.TestCase):
         )
         self.assertFalse(navigator.passed_cone_too_close)
         self.assertIsNone(navigator.passed_cone_reference)
-        self.assertIn("FORWARD", feedback)
+        self.assertIn("CONE DETECTION CONFIRMED", feedback)
 
     def test_next_cone_found_while_stopped_controls_next_move(self) -> None:
         calibration = CameraCalibration(
@@ -840,15 +853,37 @@ class ConeDetectionTests(unittest.TestCase):
             motion_applied=False,
         )
         approach_next = choose_drive_command(navigator, FRAME_SHAPE[1], command_args)
-        self.assertEqual(approach_next.name, "FORWARD")
+        self.assertEqual(approach_next.name, "STOP - CONFIRM CONE")
         self.assertEqual(
-            gate.limit(approach_next, 3.10).name,
-            "VIEW PAUSE - NEXT FORWARD",
+            gate.limit(approach_next, 3.10).throttles,
+            (0.0, 0.0, 0.0, 0.0),
         )
-        self.assertEqual(gate.limit(approach_next, 3.20), approach_next)
+
+        confirmed_left_cone = Detection(102, 301, 80, 100, 0.95)
+        navigator.update(
+            [confirmed_left_cone],
+            calibration,
+            FRAME_SHAPE,
+            motion_applied=False,
+        )
+        confirmed_turn = choose_drive_command(
+            navigator,
+            FRAME_SHAPE[1],
+            command_args,
+        )
+        self.assertEqual(confirmed_turn.name, "RIGHT")
+        self.assertEqual(
+            confirmed_turn.throttles,
+            (0.0, 0.0, 0.0015, 0.0015),
+        )
+        self.assertEqual(
+            gate.limit(confirmed_turn, 3.20).name,
+            "VIEW PAUSE - NEXT RIGHT",
+        )
+        self.assertEqual(gate.limit(confirmed_turn, 3.50), confirmed_turn)
 
     def test_next_cone_timeout_includes_countersteering_time(self) -> None:
-        command = DriveCommand("LEFT", (0.0, 0.0, 0.003, 0.003))
+        command = DriveCommand("LEFT", (0.003, 0.003, 0.0, 0.0))
         navigator = Namespace(
             awaiting_new_cone=True,
             close_cone_hazard=False,
@@ -921,6 +956,22 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertAlmostEqual(navigator.camera_offset_cm, -7.62)
         self.assertIsNone(new_preview_navigator(args).max_cones)
 
+    def test_physical_side_throttle_options_map_to_legacy_state(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "combined_cone_detection_slalom.py",
+                "--turn-side-throttle",
+                "0.02",
+                "--opposite-side-throttle",
+                "0",
+            ],
+        ):
+            args = parse_autonomous_args()
+
+        self.assertEqual(args.turn_outside_throttle, 0.02)
+        self.assertEqual(args.turn_inside_throttle, 0.0)
+
     def test_turn_test_mode_makes_left_and_right_motor_groups_distinct(self) -> None:
         command_args = Namespace(
             cruise_throttle=0.08,
@@ -953,9 +1004,9 @@ class ConeDetectionTests(unittest.TestCase):
         )
 
         self.assertEqual(left.name, "LEFT")
-        self.assertEqual(left.throttles, (0.0, 0.0, 0.10, 0.10))
+        self.assertEqual(left.throttles, (0.10, 0.10, 0.0, 0.0))
         self.assertEqual(right.name, "RIGHT")
-        self.assertEqual(right.throttles, (0.10, 0.10, 0.0, 0.0))
+        self.assertEqual(right.throttles, (0.0, 0.0, 0.10, 0.10))
 
         approach = choose_drive_command(
             navigator_for("RIGHT", phase="APPROACHING"),
@@ -977,9 +1028,9 @@ class ConeDetectionTests(unittest.TestCase):
         left_title, left_detail, _ = turn_test_banner(left, paused=False)
         right_title, right_detail, _ = turn_test_banner(right, paused=False)
         self.assertIn("LEFT", left_title)
-        self.assertIn("MOTORS 3-4 RUN", left_detail)
+        self.assertIn("MOTORS 1-2 RUN", left_detail)
         self.assertIn("RIGHT", right_title)
-        self.assertIn("MOTORS 1-2 RUN", right_detail)
+        self.assertIn("MOTORS 3-4 RUN", right_detail)
 
     def test_turn_test_banner_shows_all_motors_stopped_while_paused(self) -> None:
         title, detail, _ = turn_test_banner(
@@ -987,8 +1038,8 @@ class ConeDetectionTests(unittest.TestCase):
             paused=True,
         )
         self.assertIn("PAUSED", title)
-        self.assertIn("LEFT = M3-4", detail)
-        self.assertIn("FAR CENTER", detail)
+        self.assertIn("LEFT = M1-2", detail)
+        self.assertIn("UNCONFIRMED", detail)
 
     def test_turn_test_banner_distinguishes_automatic_camera_pause(self) -> None:
         title, detail, _ = turn_test_banner(
