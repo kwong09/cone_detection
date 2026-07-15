@@ -66,6 +66,10 @@ class CameraMotionSlalomNavigator:
     corrected_center_x_ratio: float | None = None
     last_tracked_target: Detection | None = None
     passed_cone_reference: Detection | None = None
+    passed_cone_too_close: bool = False
+    passed_cone_clearance_direction: str | None = None
+    passed_cone_clear_frames: int = 0
+    passed_cone_clear_confirmation_frames: int = 8
 
     @property
     def direction(self) -> str:
@@ -229,6 +233,82 @@ class CameraMotionSlalomNavigator:
             and width_scale <= 2.2
         )
 
+    def _is_visually_close(
+        self,
+        detection: Detection,
+        calibration: CameraCalibration,
+        frame_shape: tuple[int, ...],
+        distance_cm: float | None = None,
+    ) -> bool:
+        if distance_cm is None:
+            distance_cm = calibration.estimate_distance_cm(detection, frame_shape)
+        bottom_ratio = (detection.y + detection.height) / frame_shape[0]
+        height_ratio = detection.height / frame_shape[0]
+        return (
+            detection.cropped
+            or distance_cm <= self.hard_turn_cm
+            or bottom_ratio >= 0.82
+            or (
+                bottom_ratio >= self.visual_turn_min_bottom_ratio
+                and height_ratio >= self.turn_start_height_ratio
+            )
+        )
+
+    def _update_passed_cone_clearance(
+        self,
+        detections: list[Detection],
+        calibration: CameraCalibration,
+        frame_shape: tuple[int, ...],
+    ) -> None:
+        """Hold an away-turn until the known passed cone is safely clear."""
+        if self.passed_cone_reference is None:
+            self.passed_cone_too_close = False
+            self.passed_cone_clearance_direction = None
+            self.passed_cone_clear_frames = 0
+            return
+
+        matches = [
+            detection
+            for detection in detections
+            if self._matches_recent_passed_cone(detection, frame_shape)
+        ]
+        matched = min(
+            matches,
+            key=lambda item: (
+                abs(item.center[0] - self.passed_cone_reference.center[0])
+                + abs(item.center[1] - self.passed_cone_reference.center[1])
+            ),
+            default=None,
+        )
+        if matched is not None:
+            self.passed_cone_reference = matched
+            distance = calibration.estimate_distance_cm(matched, frame_shape)
+            if self._is_visually_close(
+                matched,
+                calibration,
+                frame_shape,
+                distance,
+            ):
+                center_ratio = self._vehicle_center_x_ratio(
+                    matched,
+                    calibration,
+                    frame_shape,
+                    distance,
+                )
+                self.passed_cone_too_close = True
+                self.passed_cone_clearance_direction = (
+                    "RIGHT" if center_ratio < 0.5 else "LEFT"
+                )
+                self.passed_cone_clear_frames = 0
+                return
+
+        self.passed_cone_clear_frames += 1
+        if self.passed_cone_clear_frames >= self.passed_cone_clear_confirmation_frames:
+            self.passed_cone_reference = None
+            self.passed_cone_too_close = False
+            self.passed_cone_clearance_direction = None
+            self.passed_cone_clear_frames = 0
+
     def _select_new_target(
         self,
         detections: list[Detection],
@@ -261,14 +341,11 @@ class CameraMotionSlalomNavigator:
                 frame_shape,
                 distance,
             )
-            visually_close = (
-                detection.cropped
-                or distance <= self.hard_turn_cm
-                or bottom_ratio >= 0.82
-                or (
-                    bottom_ratio >= self.visual_turn_min_bottom_ratio
-                    and height_ratio >= self.turn_start_height_ratio
-                )
+            visually_close = self._is_visually_close(
+                detection,
+                calibration,
+                frame_shape,
+                distance,
             )
             if visually_close and self._matches_recent_passed_cone(
                 detection,
@@ -318,13 +395,18 @@ class CameraMotionSlalomNavigator:
             ),
         )
         self.awaiting_new_cone = False
-        self.passed_cone_reference = None
         return target
 
     def _finish_pass(self) -> None:
         self.passed_cone_reference = (
             self.current_target or self.last_tracked_target
         )
+        self.passed_cone_too_close = self.passed_cone_reference is not None
+        self.passed_cone_clear_frames = 0
+        if self.corrected_center_x_ratio is not None:
+            self.passed_cone_clearance_direction = (
+                "RIGHT" if self.corrected_center_x_ratio < 0.5 else "LEFT"
+            )
         self.cones_passed += 1
         if self.max_cones is not None and self.cones_passed >= self.max_cones:
             self.course_complete = True
@@ -333,6 +415,8 @@ class CameraMotionSlalomNavigator:
             self.awaiting_new_cone = False
             self.passed_cone_side_to_ignore = None
             self.passed_cone_reference = None
+            self.passed_cone_too_close = False
+            self.passed_cone_clearance_direction = None
             self._reset_target_tracking()
             return
         self.direction_index = 1 - self.direction_index
@@ -357,6 +441,12 @@ class CameraMotionSlalomNavigator:
             self.phase = "CALIBRATION REQUIRED"
             self.current_target = None
             return "CALIBRATE DISTANCE: PLACE CONE AT MARK + PRESS C"
+
+        self._update_passed_cone_clearance(
+            detections,
+            calibration,
+            frame_shape,
+        )
 
         # Immediately after a pass, countersteer away from the old cone. Keep
         # examining frames during this interval: a safe, distant next cone can
@@ -510,6 +600,11 @@ class CameraMotionSlalomNavigator:
             return f"COURSE COMPLETE - {self.cones_passed}/{self.max_cones} CONES - STOP"
         if not calibrated:
             return "CALIBRATE DISTANCE: PLACE CONE AT MARK + PRESS C"
+        if self.passed_cone_too_close and self.passed_cone_clearance_direction:
+            return (
+                f"CLEAR {self.passed_cone_clearance_direction} - "
+                "PASSED CONE STILL CLOSE"
+            )
         if self.countersteer_remaining > 0 or self.phase == "COUNTERSTEERING":
             return f"TURN {self.direction} NOW - CONE {self.cones_passed} PASSED"
         if self.current_target is None:

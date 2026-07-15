@@ -422,8 +422,19 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     if navigator.close_cone_hazard:
         return side_command("STOP - CLOSE CONE", 0.0, 0.0)
 
+    clearance_direction = getattr(
+        navigator,
+        "passed_cone_clearance_direction",
+        None,
+    )
+    clearance = bool(
+        getattr(navigator, "passed_cone_too_close", False)
+        and clearance_direction in {"LEFT", "RIGHT"}
+    )
     # Countersteering and finding the next cone require the newly alternated turn.
-    if navigator.countersteer_remaining > 0 or (
+    if clearance and clearance_direction in {"LEFT", "RIGHT"}:
+        direction = clearance_direction
+    elif navigator.countersteer_remaining > 0 or (
         target is None and navigator.awaiting_new_cone
     ):
         direction = navigator.direction
@@ -444,9 +455,10 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     # inside pair is stopped and is never commanded in reverse.
     inside = 0.0 if getattr(args, "turn_test_mode", False) else args.turn_inside_throttle
     outside = args.turn_outside_throttle
+    name = f"CLEAR {direction}" if clearance else direction
     if direction == "RIGHT":
-        return side_command("RIGHT", outside, inside)
-    return side_command("LEFT", inside, outside)
+        return side_command(name, outside, inside)
+    return side_command(name, inside, outside)
 
 
 def enforce_next_cone_timeout(
@@ -496,13 +508,13 @@ def turn_test_banner(
             f"NEXT MOTION COMMAND: {next_command}",
             (80, 230, 255),
         )
-    if command.name == "LEFT":
+    if command.name in {"LEFT", "CLEAR LEFT"}:
         return (
             "<<<  TURN TEST: LEFT",
             "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
             (255, 220, 0),
         )
-    if command.name == "RIGHT":
+    if command.name in {"RIGHT", "CLEAR RIGHT"}:
         return (
             "TURN TEST: RIGHT  >>>",
             "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",

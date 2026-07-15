@@ -314,8 +314,12 @@ remain outlined as the robot approaches it.
 The dashboard outlines every cone accepted by the detector, including the cone
 just passed. The navigator now retains that cone's last size and position and
 continues matching it as camera motion moves it across the image. A matching
-close cone is ignored while a safe distant next cone is acquired; this prevents
-the expected old cone from causing `STOP - CLOSE CONE DETECTED WHILE SEARCHING`.
+close cone is ignored as a new target while a safe distant next cone is
+acquired. It still blocks forward motion: the robot commands the same gentle
+turn away from the passed cone until eight consecutive camera frames confirm
+that cone is clear. This prevents both `STOP - CLOSE CONE DETECTED WHILE
+SEARCHING` and a premature `FORWARD` command while the old cone remains
+alongside the chassis.
 An unknown close cone that does not match the tracked old cone still latches the
 stop, because blindly turning toward an unidentified nearby object could cause a
 collision. Reposition the robot at the course start and press `R` before

@@ -724,6 +724,42 @@ class ConeDetectionTests(unittest.TestCase):
         self.assertFalse(navigator.close_cone_hazard)
         self.assertFalse(navigator.awaiting_new_cone)
         self.assertIs(navigator.current_target, distant_next_cone)
+        self.assertIs(navigator.passed_cone_reference, same_close_cone)
+        self.assertTrue(navigator.passed_cone_too_close)
+        self.assertEqual(navigator.passed_cone_clearance_direction, "RIGHT")
+        self.assertIn("CLEAR RIGHT", feedback)
+
+        command = choose_drive_command(
+            navigator,
+            FRAME_SHAPE[1],
+            Namespace(
+                max_cones=3,
+                cruise_throttle=0.003,
+                turn_outside_throttle=0.0045,
+                turn_inside_throttle=0.0,
+                turn_test_mode=False,
+            ),
+        )
+        self.assertEqual(command.name, "CLEAR RIGHT")
+        self.assertEqual(command.throttles, (0.0045, 0.0045, 0.0, 0.0))
+
+        # A brief detector dropout must not immediately switch back to forward.
+        for _ in range(7):
+            feedback = navigator.update(
+                [distant_next_cone],
+                calibration,
+                FRAME_SHAPE,
+                motion_applied=False,
+            )
+            self.assertIn("CLEAR RIGHT", feedback)
+
+        feedback = navigator.update(
+            [distant_next_cone],
+            calibration,
+            FRAME_SHAPE,
+            motion_applied=False,
+        )
+        self.assertFalse(navigator.passed_cone_too_close)
         self.assertIsNone(navigator.passed_cone_reference)
         self.assertIn("FORWARD", feedback)
 
