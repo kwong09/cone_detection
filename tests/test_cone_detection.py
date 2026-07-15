@@ -17,6 +17,8 @@ from cone_detection_iteration_5_pi import (
 from autonomous_cone_slalom import (
     DriveCommand,
     FourEscDrive,
+    MOTOR_START_US,
+    MOTOR_STOP_US,
     apply_drive_output,
     choose_drive_command,
     course_complete_feedback,
@@ -92,6 +94,157 @@ class ConeDetectionTests(unittest.TestCase):
 
         self.assertEqual(events, [("stop", True)])
 
+    def test_turn_command_stops_inside_pair_immediately(self) -> None:
+        events: list[object] = []
+
+        class FakeDrive:
+            def stop(self, immediate: bool = False) -> None:
+                events.append(("stop", immediate))
+
+            def command(self, throttles: object, immediate_zero: bool = False) -> None:
+                events.append(("command", throttles, immediate_zero))
+
+            def step(self) -> None:
+                events.append("step")
+
+        command = DriveCommand("RIGHT", (0.003, 0.003, 0.0, 0.0))
+        apply_drive_output(
+            FakeDrive(),  # type: ignore[arg-type]
+            command,
+            Namespace(turn_test_mode=False),
+            course_complete=False,
+        )
+
+        self.assertEqual(
+            events,
+            [("command", command.throttles, True), "step"],
+        )
+
+    def test_visual_height_trigger_turns_centered_cone_with_bad_distance(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        centered_close = Detection(540, 310, 200, 230, 0.95)
+        navigator = CameraMotionSlalomNavigator(
+            turn_start_cm=130.0,
+            turn_start_height_ratio=0.30,
+        )
+
+        first_feedback = navigator.update(
+            [centered_close], calibration, FRAME_SHAPE
+        )
+        self.assertEqual(navigator.phase, "APPROACHING")
+        self.assertIn("FORWARD", first_feedback)
+
+        second_feedback = navigator.update(
+            [centered_close], calibration, FRAME_SHAPE
+        )
+        self.assertEqual(navigator.phase, "TURNING")
+        self.assertEqual(navigator.turn_trigger_source, "CONE HEIGHT")
+        self.assertIn("BEGIN RIGHT TURN", second_feedback)
+        self.assertNotIn("FORWARD", second_feedback)
+        self.assertFalse(navigator.pass_armed)
+        self.assertEqual(navigator.cones_passed, 0)
+
+        smaller = Detection(580, 430, 120, 100, 0.95)
+        navigator.update([smaller], calibration, FRAME_SHAPE)
+        self.assertEqual(navigator.phase, "TURNING")
+
+        command = choose_drive_command(
+            navigator,
+            FRAME_SHAPE[1],
+            Namespace(
+                max_cones=3,
+                cruise_throttle=0.0001,
+                turn_outside_throttle=0.003,
+                turn_inside_throttle=0.0,
+                hard_inside_throttle=0.0,
+                hard_turn_cm=80.0,
+                turn_test_mode=False,
+            ),
+        )
+        self.assertEqual(command.name, "RIGHT")
+        self.assertEqual(command.throttles, (0.003, 0.003, 0.0, 0.0))
+
+    def test_visual_turn_requires_two_consecutive_large_cone_frames(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        large = Detection(540, 310, 200, 230, 0.95)
+        small = Detection(580, 430, 120, 100, 0.95)
+        navigator = CameraMotionSlalomNavigator(turn_start_height_ratio=0.30)
+
+        navigator.update([large], calibration, FRAME_SHAPE)
+        self.assertEqual(navigator.visual_turn_frames, 1)
+        navigator.update([small], calibration, FRAME_SHAPE)
+        self.assertEqual(navigator.visual_turn_frames, 0)
+        self.assertEqual(navigator.phase, "APPROACHING")
+        navigator.update([large], calibration, FRAME_SHAPE)
+        self.assertEqual(navigator.phase, "APPROACHING")
+        navigator.update([large], calibration, FRAME_SHAPE)
+        self.assertEqual(navigator.phase, "TURNING")
+
+    def test_visual_turn_height_ratio_is_resolution_independent(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+
+        for frame_shape in ((720, 1280, 3), (1080, 1920, 3)):
+            with self.subTest(frame_height=frame_shape[0]):
+                target_height = round(frame_shape[0] * 0.31)
+                target_width = round(frame_shape[1] * 0.12)
+                target = Detection(
+                    (frame_shape[1] - target_width) // 2,
+                    round(frame_shape[0] * 0.42),
+                    target_width,
+                    target_height,
+                    0.95,
+                )
+                navigator = CameraMotionSlalomNavigator(
+                    turn_start_height_ratio=0.30
+                )
+
+                navigator.update([target], calibration, frame_shape)
+                navigator.update([target], calibration, frame_shape)
+
+                self.assertEqual(navigator.phase, "TURNING")
+                self.assertEqual(navigator.turn_trigger_source, "CONE HEIGHT")
+
+    def test_cropped_cone_immediately_triggers_turn_despite_distance_smoothing(self) -> None:
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        cropped = Detection(500, 360, 280, 360, 0.98, cropped=True)
+        navigator = CameraMotionSlalomNavigator(
+            phase="APPROACHING",
+            smoothed_distance_cm=300.0,
+        )
+
+        feedback = navigator.update([cropped], calibration, FRAME_SHAPE)
+
+        self.assertEqual(navigator.raw_distance_cm, navigator.hard_turn_cm)
+        self.assertGreater(navigator.smoothed_distance_cm or 0.0, navigator.turn_start_cm)
+        self.assertEqual(navigator.phase, "TURNING")
+        self.assertEqual(navigator.turn_trigger_source, "DISTANCE")
+        self.assertIn("TURN", feedback)
+        self.assertNotIn("FORWARD", feedback)
+
     def test_third_pass_latches_complete_without_countersteering(self) -> None:
         navigator = CameraMotionSlalomNavigator(
             max_cones=3,
@@ -143,21 +296,30 @@ class ConeDetectionTests(unittest.TestCase):
             args = parse_autonomous_args()
 
         self.assertEqual(args.max_cones, 3)
-        self.assertEqual(args.cruise_throttle, 0.02)
-        self.assertEqual(args.turn_outside_throttle, 0.03)
-        self.assertEqual(args.turn_inside_throttle, 0.01)
-        self.assertEqual(args.ramp_step_us, 5)
+        self.assertEqual(args.turn_start_height_ratio, 0.30)
+        self.assertEqual(args.countersteer_frames, 32)
+        self.assertEqual(args.cruise_throttle, 0.0001)
+        self.assertEqual(args.turn_outside_throttle, 0.003)
+        self.assertEqual(args.turn_inside_throttle, 0.0)
+        self.assertEqual(args.ramp_step_us, 3)
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.cruise_throttle),
-            1473,
+            1460,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle),
-            1479,
+            1462,
         )
         self.assertEqual(
             FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle),
-            1466,
+            1400,
+        )
+        ramp_frames_to_start = (
+            MOTOR_START_US[0] - MOTOR_STOP_US[0] + args.ramp_step_us - 1
+        ) // args.ramp_step_us
+        self.assertGreaterEqual(
+            args.countersteer_frames,
+            ramp_frames_to_start + 12,
         )
         self.assertEqual(new_navigator(args).max_cones, 3)
         self.assertIsNone(new_preview_navigator(args).max_cones)
@@ -337,6 +499,49 @@ class ConeDetectionTests(unittest.TestCase):
         command = choose_drive_command(navigator, FRAME_SHAPE[1], command_args)
         self.assertEqual(command.name, "STOP - CLOSE CONE")
         self.assertEqual(command.throttles, (0.0, 0.0, 0.0, 0.0))
+
+    def test_awaiting_navigator_rejects_visually_close_cone_with_bad_range(self) -> None:
+        visible = Detection(540, 310, 200, 230, 0.98)
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        navigator = CameraMotionSlalomNavigator(
+            awaiting_new_cone=True,
+            phase="SEARCHING",
+            turn_start_height_ratio=0.30,
+        )
+
+        feedback = navigator.update([visible], calibration, FRAME_SHAPE)
+
+        self.assertIsNone(navigator.current_target)
+        self.assertTrue(navigator.awaiting_new_cone)
+        self.assertTrue(navigator.close_cone_hazard)
+        self.assertTrue(feedback.startswith("STOP"))
+
+    def test_awaiting_navigator_ignores_close_edge_cone_with_bad_range(self) -> None:
+        passed_edge_cone = Detection(20, 310, 200, 230, 0.98)
+        calibration = CameraCalibration(
+            focal_length_px=2000.0,
+            cone_height_cm=30.5,
+            frame_width=1280,
+            frame_height=720,
+            calibration_distance_cm=100.0,
+        )
+        navigator = CameraMotionSlalomNavigator(
+            awaiting_new_cone=True,
+            phase="SEARCHING",
+            turn_start_height_ratio=0.30,
+        )
+
+        navigator.update([passed_edge_cone], calibration, FRAME_SHAPE)
+
+        self.assertIsNone(navigator.current_target)
+        self.assertTrue(navigator.awaiting_new_cone)
+        self.assertFalse(navigator.close_cone_hazard)
 
     def test_detects_complete_distant_cone(self) -> None:
         frame = polygon_frame(

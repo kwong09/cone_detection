@@ -203,8 +203,11 @@ pressing Ctrl+C also commands the motor stop pulse. Use `--headless` only when
 no live window is needed; headless autonomy starts immediately.
 
 The beginning-of-course configuration drives toward a centered cone, begins
-its alternating turn at 130 cm, confirms the pass from cone motion, and repeats
-for exactly three cones:
+its alternating turn at 130 cm, or when a floor-level cone fills at least 30%
+of the image height for two consecutive frames, confirms the pass from cone
+motion, and repeats for exactly three cones. The visual-size trigger prevents
+an inaccurate saved distance calibration from continuing to command forward
+toward a visibly close cone:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
@@ -221,7 +224,7 @@ For a raised-wheel test that makes the two turn directions unmistakable, use:
 
 ```bash
 python3 combined_cone_detection_slalom.py --backend picamera2 \
-  --turn-test-mode --turn-outside-throttle 0.03 --ramp-step-us 5 --drive
+  --turn-test-mode --turn-outside-throttle 0.003 --ramp-step-us 3 --drive
 ```
 
 Turn-test mode shows a large direction banner and deliberately suppresses
@@ -242,15 +245,19 @@ Python or hardware can still fail before that write occurs.
 
 The autonomous program deliberately uses a separate Pi calibration file so a
 calibration committed from another camera cannot start the robot. The initial
-settings now use 2% forward throttle, 3% outside-turn throttle, 1% inside-turn
-throttle, and a gentler 5 us ramp step so the camera has more time to react.
-The program also stops immediately on camera loss, stops after two seconds of
-searching without seeing the next cone, and stops on Ctrl+C. Every command that
-sets all four motors to zero bypasses the acceleration ramp and writes the stop
-pulse immediately. Once direction and stopping have been verified with raised
-wheels, test on the ground at low speed with wide cone spacing. If the chassis
-turns opposite the printed direction, swap `RIGHT_TURN_MOTORS` and
-`LEFT_TURN_MOTORS` in the autonomous script before continuing.
+settings now request the verified minimum continuous running pulse: 1460 us
+while moving straight, 1462 us on the outside motor pair while turning, and the
+1400 us stop pulse on the inside pair. A 3 us ramp step gives the camera more
+time to react during acceleration. All zero-output channels stop immediately,
+so an ordinary turn no longer leaves the inside wheels pushing the robot
+forward. The post-pass counterturn lasts 32 frames so the newly activated motor
+pair reaches its minimum moving pulse before the next centered cone can be
+accepted. The program also stops immediately on camera loss, stops after two
+seconds of searching without seeing the next cone, and stops on Ctrl+C. Once
+direction and stopping have been verified with raised wheels, test on the
+ground at low speed with wide cone spacing. If the chassis turns opposite the
+printed direction, swap `RIGHT_TURN_MOTORS` and `LEFT_TURN_MOTORS` in the
+autonomous script before continuing.
 
 In the detector-only dashboard, press **R** to reset the sequence and **Q** or
 **Escape** to stop.

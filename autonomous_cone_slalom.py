@@ -240,7 +240,9 @@ def apply_drive_output(
         return
     drive.command(
         command.throttles,
-        immediate_zero=args.turn_test_mode,
+        # Deceleration is never ramped. This makes the stopped inside motor
+        # pair create a real turn instead of continuing to push forward.
+        immediate_zero=True,
     )
     drive.step()
 
@@ -480,21 +482,30 @@ def parse_args() -> argparse.Namespace:
     pi_calibration_file = Path(__file__).with_name("pi_cone_camera_calibration.json")
     parser.add_argument("--calibration-file", type=Path, default=pi_calibration_file)
     parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument(
+        "--turn-start-height-ratio",
+        type=float,
+        default=0.30,
+        help=(
+            "also begin the planned turn after the cone fills this fraction "
+            "of image height for two frames"
+        ),
+    )
     parser.add_argument("--hard-turn-cm", type=float, default=80.0)
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=12)
+    parser.add_argument("--countersteer-frames", type=int, default=32)
     parser.add_argument(
         "--max-cones",
         type=int,
         default=3,
         help="stop and remain stopped after this many confirmed cone passes",
     )
-    parser.add_argument("--cruise-throttle", type=float, default=0.02)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.03)
-    parser.add_argument("--turn-inside-throttle", type=float, default=0.01)
+    parser.add_argument("--cruise-throttle", type=float, default=0.0001)
+    parser.add_argument("--turn-outside-throttle", type=float, default=0.003)
+    parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
     parser.add_argument("--hard-inside-throttle", type=float, default=0.0)
     parser.add_argument("--arm-seconds", type=float, default=5.0)
-    parser.add_argument("--ramp-step-us", type=int, default=5)
+    parser.add_argument("--ramp-step-us", type=int, default=3)
     parser.add_argument("--camera-loss-frames", type=int, default=3)
     parser.add_argument(
         "--search-timeout-seconds",
@@ -589,6 +600,12 @@ def main() -> None:
         print(
             f"Course plan: drive and alternate around {args.max_cones} cones, "
             "then stop and wait for R."
+        )
+        print(
+            "Minimum-speed pulses: "
+            f"forward {FourEscDrive._pulse_for_throttle(0, args.cruise_throttle)} us, "
+            f"turn outside {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
+            f"turn inside {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
         )
         if args.turn_test_mode:
             print(

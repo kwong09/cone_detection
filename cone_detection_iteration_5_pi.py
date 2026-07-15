@@ -166,6 +166,7 @@ def create_camera(args: argparse.Namespace) -> CameraSource:
 def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
     return CameraMotionSlalomNavigator(
         turn_start_cm=args.turn_start_cm,
+        turn_start_height_ratio=args.turn_start_height_ratio,
         hard_turn_cm=args.hard_turn_cm,
         pass_distance_cm=args.pass_distance_cm,
         countersteer_frames=args.countersteer_frames,
@@ -269,9 +270,15 @@ def parse_args() -> argparse.Namespace:
         "--calibration-file", type=Path, default=DEFAULT_CALIBRATION_FILE
     )
     parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument(
+        "--turn-start-height-ratio",
+        type=float,
+        default=0.30,
+        help="visual turn trigger as a fraction of image height",
+    )
     parser.add_argument("--hard-turn-cm", type=float, default=80.0)
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=12)
+    parser.add_argument("--countersteer-frames", type=int, default=32)
     return parser.parse_args()
 
 
@@ -289,6 +296,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Image sizes, times, and physical measurements must be positive")
     if not args.turn_start_cm > args.hard_turn_cm > args.pass_distance_cm:
         raise SystemExit("Distances must satisfy: turn-start > hard-turn > pass-distance")
+    if not 0.0 < args.turn_start_height_ratio < 1.0:
+        raise SystemExit("turn-start-height-ratio must be between 0 and 1")
     if args.countersteer_frames < 1:
         raise SystemExit("countersteer-frames must be at least 1")
 

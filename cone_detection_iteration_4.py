@@ -33,10 +33,13 @@ class CameraMotionSlalomNavigator:
     """Time a slalom pass using distance and cone motion in a turning camera."""
 
     turn_start_cm: float = 130.0
+    turn_start_height_ratio: float = 0.30
+    visual_turn_min_bottom_ratio: float = 0.72
     hard_turn_cm: float = 80.0
     pass_distance_cm: float = 60.0
-    countersteer_frames: int = 12
+    countersteer_frames: int = 32
     pass_confirmation_frames: int = 3
+    visual_turn_confirmation_frames: int = 2
     direction_index: int = 0
     cones_passed: int = 0
     phase: str = "SEARCHING"
@@ -55,6 +58,9 @@ class CameraMotionSlalomNavigator:
     close_cone_hazard: bool = False
     max_cones: int | None = None
     course_complete: bool = False
+    current_target_height_ratio: float | None = None
+    visual_turn_frames: int = 0
+    turn_trigger_source: str | None = None
 
     @property
     def direction(self) -> str:
@@ -80,6 +86,9 @@ class CameraMotionSlalomNavigator:
         self.moving_away_frames = 0
         self.missing_frames = 0
         self.close_cone_hazard = False
+        self.current_target_height_ratio = None
+        self.visual_turn_frames = 0
+        self.turn_trigger_source = None
 
     def _relative_side_progress(self, center_x_ratio: float) -> float:
         if self.turn_start_x_ratio is None:
@@ -122,17 +131,24 @@ class CameraMotionSlalomNavigator:
         for detection in detections:
             distance = calibration.estimate_distance_cm(detection, frame_shape)
             bottom_ratio = (detection.y + detection.height) / frame_shape[0]
+            height_ratio = detection.height / frame_shape[0]
             center_ratio = detection.center[0] / frame_shape[1]
             visually_close = (
                 detection.cropped
                 or distance <= self.hard_turn_cm
                 or bottom_ratio >= 0.82
+                or (
+                    bottom_ratio >= self.visual_turn_min_bottom_ratio
+                    and height_ratio >= self.turn_start_height_ratio
+                )
             )
-            if visually_close and 0.20 <= center_ratio <= 0.80:
-                # This may be the cone just passed or an unexpectedly close
-                # new cone. Do not guess and count it twice: expose a STOP
-                # condition while the dashboard still outlines the cone.
-                self.close_cone_hazard = True
+            if visually_close:
+                if 0.20 <= center_ratio <= 0.80:
+                    # A close centered cone may be the old cone or an
+                    # unexpected obstacle, so latch a STOP for operator review.
+                    self.close_cone_hazard = True
+                # A close edge cone is normally the cone just passed. Never
+                # accept either case as the next far course target.
                 continue
             if (
                 not detection.cropped
@@ -198,6 +214,9 @@ class CameraMotionSlalomNavigator:
         self.current_target = target
         if target is None:
             self.raw_distance_cm = None
+            self.current_target_height_ratio = None
+            if self.phase == "APPROACHING":
+                self.visual_turn_frames = 0
             if self.pass_armed:
                 self.missing_frames += 1
                 if self.missing_frames >= self.pass_confirmation_frames:
@@ -213,6 +232,8 @@ class CameraMotionSlalomNavigator:
             raw_distance = min(raw_distance, self.hard_turn_cm)
         self.raw_distance_cm = raw_distance
         center_x_ratio = target.center[0] / frame_shape[1]
+        height_ratio = target.height / frame_shape[0]
+        self.current_target_height_ratio = height_ratio
         bottom_ratio = (target.y + target.height) / frame_shape[0]
 
         if self.phase in {"SEARCHING", "CALIBRATION REQUIRED"}:
@@ -225,12 +246,29 @@ class CameraMotionSlalomNavigator:
         self.closest_distance_cm = min(self.closest_distance_cm, raw_distance)
         self.tallest_target_px = max(self.tallest_target_px, target.height)
 
-        if (
-            self.phase == "APPROACHING"
-            and self.smoothed_distance_cm <= self.turn_start_cm
-        ):
-            self.phase = "TURNING"
-            self.turn_start_x_ratio = center_x_ratio
+        if self.phase == "APPROACHING":
+            visual_turn_candidate = (
+                bottom_ratio >= self.visual_turn_min_bottom_ratio
+                and height_ratio >= self.turn_start_height_ratio
+            )
+            if visual_turn_candidate:
+                self.visual_turn_frames += 1
+            else:
+                self.visual_turn_frames = 0
+
+            distance_turn_ready = (
+                raw_distance <= self.turn_start_cm
+                or self.smoothed_distance_cm <= self.turn_start_cm
+            )
+            visual_turn_ready = (
+                self.visual_turn_frames >= self.visual_turn_confirmation_frames
+            )
+            if distance_turn_ready or visual_turn_ready:
+                self.phase = "TURNING"
+                self.turn_start_x_ratio = center_x_ratio
+                self.turn_trigger_source = (
+                    "DISTANCE" if distance_turn_ready else "CONE HEIGHT"
+                )
 
         if self.phase in {"TURNING", "PASSING"}:
             cleared_side = self._has_cleared_to_expected_side(center_x_ratio)
@@ -303,7 +341,7 @@ class CameraMotionSlalomNavigator:
 
         if self.pass_armed:
             return f"HOLD {self.direction} - CLEARING CONE AT {distance_text}"
-        if distance > self.turn_start_cm:
+        if self.phase not in {"TURNING", "PASSING"} and distance > self.turn_start_cm:
             if center_x_ratio < 0.44:
                 return f"ALIGN LEFT - CONE {distance_text}"
             if center_x_ratio > 0.56:
@@ -315,6 +353,12 @@ class CameraMotionSlalomNavigator:
             return f"HARD {self.direction} - CONE {distance_text}"
         if cleared_side:
             return f"HOLD {self.direction} - CONE SLID {self.expected_cone_side}"
+        if self.turn_trigger_source == "CONE HEIGHT":
+            height_ratio = self.current_target_height_ratio or 0.0
+            return (
+                f"BEGIN {self.direction} TURN - CONE HEIGHT {height_ratio:.0%} "
+                f">= {self.turn_start_height_ratio:.0%}"
+            )
         return f"BEGIN {self.direction} TURN - TRACK CONE MOTION"
 
 
@@ -333,9 +377,15 @@ def parse_args() -> argparse.Namespace:
         "--calibration-file", type=Path, default=DEFAULT_CALIBRATION_FILE
     )
     parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument(
+        "--turn-start-height-ratio",
+        type=float,
+        default=0.30,
+        help="visual turn trigger as a fraction of image height",
+    )
     parser.add_argument("--hard-turn-cm", type=float, default=80.0)
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=12)
+    parser.add_argument("--countersteer-frames", type=int, default=32)
     return parser.parse_args()
 
 
@@ -350,6 +400,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("All physical measurements must be greater than zero")
     if not args.turn_start_cm > args.hard_turn_cm > args.pass_distance_cm:
         raise SystemExit("Distances must satisfy: turn-start > hard-turn > pass-distance")
+    if not 0.0 < args.turn_start_height_ratio < 1.0:
+        raise SystemExit("turn-start-height-ratio must be between 0 and 1")
     if args.countersteer_frames < 1:
         raise SystemExit("countersteer-frames must be at least 1")
 
@@ -357,6 +409,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def new_navigator(args: argparse.Namespace) -> CameraMotionSlalomNavigator:
     return CameraMotionSlalomNavigator(
         turn_start_cm=args.turn_start_cm,
+        turn_start_height_ratio=args.turn_start_height_ratio,
         hard_turn_cm=args.hard_turn_cm,
         pass_distance_cm=args.pass_distance_cm,
         countersteer_frames=args.countersteer_frames,

@@ -331,16 +331,36 @@ def make_dashboard(
     elif calibration is None:
         command_color = (0, 80, 255)
 
-    feedback_size = cv2.getTextSize(feedback, cv2.FONT_HERSHEY_SIMPLEX, 0.92, 3)[0]
+    feedback_scale = 0.92
+    feedback_thickness = 3
+    feedback_size = cv2.getTextSize(
+        feedback,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        feedback_scale,
+        feedback_thickness,
+    )[0]
+    available_feedback_width = header.shape[1] - 32
+    if feedback_size[0] > available_feedback_width:
+        feedback_scale = max(
+            0.52,
+            feedback_scale * available_feedback_width / feedback_size[0],
+        )
+        feedback_thickness = 2
+        feedback_size = cv2.getTextSize(
+            feedback,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            feedback_scale,
+            feedback_thickness,
+        )[0]
     feedback_x = max(16, (header.shape[1] - feedback_size[0]) // 2)
     cv2.putText(
         header,
         feedback,
         (feedback_x, 37),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.92,
+        feedback_scale,
         command_color,
-        3,
+        feedback_thickness,
     )
 
     if calibration is None:
@@ -348,10 +368,23 @@ def make_dashboard(
             f"MEASURE CONE HEIGHT | PUT CONE {calibration_distance_cm:.0f} CM FROM CAMERA | PRESS C"
         )
     else:
-        range_line = (
-            f"DISTANCE: {format_distance(distance_cm)}   |   TURN: {navigator.turn_start_cm:.0f} CM   "
-            f"|   HARD: {navigator.hard_turn_cm:.0f} CM   |   PASS: {navigator.pass_distance_cm:.0f} CM"
-        )
+        visual_turn_ratio = getattr(navigator, "turn_start_height_ratio", None)
+        target_height_ratio = getattr(navigator, "current_target_height_ratio", None)
+        trigger_source = getattr(navigator, "turn_trigger_source", None) or "--"
+        if visual_turn_ratio is None:
+            range_line = (
+                f"DISTANCE: {format_distance(distance_cm)}   |   TURN: {navigator.turn_start_cm:.0f} CM   "
+                f"|   HARD: {navigator.hard_turn_cm:.0f} CM   |   PASS: {navigator.pass_distance_cm:.0f} CM"
+            )
+        else:
+            height_text = (
+                "--" if target_height_ratio is None else f"{target_height_ratio:.0%}"
+            )
+            range_line = (
+                f"DIST: {format_distance(distance_cm)}   |   CONE HEIGHT: {height_text}   |   "
+                f"TURN: {navigator.turn_start_cm:.0f} CM OR {visual_turn_ratio:.0%}   |   "
+                f"TRIGGER: {trigger_source}"
+            )
     range_size = cv2.getTextSize(range_line, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)[0]
     range_x = max(16, (header.shape[1] - range_size[0]) // 2)
     cv2.putText(
