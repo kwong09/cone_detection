@@ -2,8 +2,8 @@
 """Drive the four-ESC robot through an alternating red-cone slalom.
 
 This combines the team's PCA9685 motor calibration with the Raspberry Pi 5 /
-Arducam detector and the camera-motion-aware navigator.  Motor output remains
-forward-only: turns are made by slowing the motors on the inside of the turn.
+Arducam detector and the camera-motion-aware navigator. Motor output remains
+forward-only: turns run only the front/back motors on the requested side.
 
 Keep the wheels raised for the first test and keep a physical kill switch in
 reach.  Camera loss, missing calibration, Ctrl+C, and normal exit all command
@@ -16,6 +16,7 @@ import argparse
 import atexit
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,10 +45,11 @@ MOTOR_START_US = (1460, 1460, 1460, 1460)
 # Preserve that tested electrical limit until each ESC has been calibrated.
 MOTOR_MAX_US = (2100, 2100, 2100, 2100)
 
-# In the supplied controller, Right activates 1-2 and Left activates 3-4.
-# These names describe the requested turn, not assumed chassis wiring.
-RIGHT_TURN_MOTORS = (0, 1)
-LEFT_TURN_MOTORS = (2, 3)
+# PCA9685 channels 1-2 are the left-front/left-rear motors, while channels
+# 3-4 are right-front/right-rear. Each requested turn runs only the two motors
+# on that same physical side, matching the chassis test.
+LEFT_TURN_MOTORS = (0, 1)
+RIGHT_TURN_MOTORS = (2, 3)
 WINDOW_NAME = "Autonomous Cone Slalom - Live Camera"
 
 
@@ -57,6 +59,10 @@ class FourEscDrive:
     def __init__(self, ramp_step_us: int) -> None:
         self._pca = None
         self._closed = True
+        self._io_lock = threading.RLock()
+        self._motion_stop_timer: threading.Timer | None = None
+        self._motion_deadline: float | None = None
+        self._watchdog_error: Exception | None = None
         try:
             import board
             import busio
@@ -108,16 +114,85 @@ class FourEscDrive:
         return int((pulse_us * PWM_FREQUENCY * 65535) / 1_000_000)
 
     def _write(self) -> None:
-        first_error: Exception | None = None
-        for channel, pulse_us in zip(self._channels, self._current):
-            try:
-                channel.duty_cycle = self._pulse_to_duty(pulse_us)
-            except Exception as error:
-                # Still try to stop the other motors if one PCA channel fails.
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+        with self._io_lock:
+            first_error: Exception | None = None
+            for channel, pulse_us in zip(self._channels, self._current):
+                try:
+                    channel.duty_cycle = self._pulse_to_duty(pulse_us)
+                except Exception as error:
+                    # Still try to stop the other motors if one channel fails.
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
+
+    def _cancel_motion_watchdog_locked(self) -> None:
+        timer = self._motion_stop_timer
+        self._motion_stop_timer = None
+        self._motion_deadline = None
+        if timer is not None:
+            timer.cancel()
+
+    def _motion_deadline_expired(self, expected_deadline: float) -> None:
+        """Stop independently if camera capture cannot service the main loop."""
+        with self._io_lock:
+            if self._closed or self._motion_deadline != expected_deadline:
+                return
+            remaining = expected_deadline - time.monotonic()
+            if remaining > 0.001:
+                # Timers are normally late, but preserve the absolute deadline
+                # if a platform happens to wake this callback slightly early.
+                timer = threading.Timer(
+                    remaining,
+                    self._motion_deadline_expired,
+                    args=(expected_deadline,),
+                )
+                timer.daemon = True
+                self._motion_stop_timer = timer
+                timer.start()
+                return
+
+            self._motion_stop_timer = None
+            self._motion_deadline = None
+            self._target = list(MOTOR_STOP_US)
+            self._current = list(MOTOR_STOP_US)
+            stop_error: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    self._write()
+                    stop_error = None
+                    break
+                except Exception as error:
+                    stop_error = error
+            if stop_error is not None:
+                self._watchdog_error = stop_error
+                print(
+                    f"WARNING: timed ESC stop write failed: {stop_error}",
+                    file=sys.stderr,
+                )
+
+    def _arm_motion_watchdog_locked(self, deadline: float) -> None:
+        if (
+            self._motion_deadline == deadline
+            and self._motion_stop_timer is not None
+        ):
+            return
+        self._cancel_motion_watchdog_locked()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            self._target = list(MOTOR_STOP_US)
+            self._current = list(MOTOR_STOP_US)
+            self._write()
+            return
+        self._motion_deadline = deadline
+        timer = threading.Timer(
+            remaining,
+            self._motion_deadline_expired,
+            args=(deadline,),
+        )
+        timer.daemon = True
+        self._motion_stop_timer = timer
+        timer.start()
 
     @staticmethod
     def _pulse_for_throttle(index: int, throttle: float) -> int:
@@ -133,31 +208,66 @@ class FourEscDrive:
         self,
         motor_throttles: tuple[float, float, float, float],
         immediate_zero: bool = False,
+        immediate_positive: bool = False,
+        stop_deadline: float | None = None,
     ) -> None:
-        self._target = [
-            self._pulse_for_throttle(index, value)
-            for index, value in enumerate(motor_throttles)
-        ]
-        if immediate_zero:
-            # Raised-wheel turn testing needs the banner and actual motor
-            # groups to agree on the same frame. Positive commands still ramp
-            # up, but every zero-throttle channel jumps to its stop pulse.
-            for index, throttle in enumerate(motor_throttles):
-                if throttle == 0.0:
-                    self._current[index] = MOTOR_STOP_US[index]
+        with self._io_lock:
+            if self._watchdog_error is not None:
+                raise RuntimeError("The timed ESC stop watchdog failed") from self._watchdog_error
+            self._target = [
+                self._pulse_for_throttle(index, value)
+                for index, value in enumerate(motor_throttles)
+            ]
+            if immediate_zero or immediate_positive:
+                for index, throttle in enumerate(motor_throttles):
+                    if immediate_zero and throttle == 0.0:
+                        self._current[index] = MOTOR_STOP_US[index]
+                    elif immediate_positive and throttle > 0.0:
+                        # A timed creep burst starts from the verified minimum
+                        # moving pulse. Ramping from stop would consume the
+                        # short burst without ever moving the robot.
+                        self._current[index] = self._target[index]
+            if stop_deadline is None:
+                self._cancel_motion_watchdog_locked()
+            else:
+                self._arm_motion_watchdog_locked(stop_deadline)
 
     def step(self) -> None:
-        for index, target in enumerate(self._target):
-            difference = target - self._current[index]
-            difference = max(-self._ramp_step_us, min(self._ramp_step_us, difference))
-            self._current[index] += difference
-        self._write()
+        with self._io_lock:
+            if self._watchdog_error is not None:
+                raise RuntimeError("The timed ESC stop watchdog failed") from self._watchdog_error
+            if (
+                self._motion_deadline is not None
+                and time.monotonic() >= self._motion_deadline
+            ):
+                self._motion_deadline_expired(self._motion_deadline)
+                return
+            for index, target in enumerate(self._target):
+                difference = target - self._current[index]
+                difference = max(-self._ramp_step_us, min(self._ramp_step_us, difference))
+                self._current[index] += difference
+            self._write()
 
     def stop(self, immediate: bool = False) -> None:
-        self._target = list(MOTOR_STOP_US)
-        if immediate:
-            self._current = list(MOTOR_STOP_US)
-            self._write()
+        with self._io_lock:
+            self._cancel_motion_watchdog_locked()
+            self._target = list(MOTOR_STOP_US)
+            if immediate:
+                self._current = list(MOTOR_STOP_US)
+                self._write()
+
+    def motion_is_active(self) -> bool:
+        """Report actual pulse state, honoring an expired stop deadline."""
+        with self._io_lock:
+            if (
+                self._motion_deadline is not None
+                and time.monotonic() >= self._motion_deadline
+            ):
+                self._motion_deadline_expired(self._motion_deadline)
+            return any(
+                current != stopped
+                for current, stopped in zip(self._current, MOTOR_STOP_US)
+            )
 
     def close(self) -> None:
         if self._closed:
@@ -186,6 +296,55 @@ class FourEscDrive:
 class DriveCommand:
     name: str
     throttles: tuple[float, float, float, float]
+
+
+@dataclass
+class MotionPulseGate:
+    """Alternate motion and camera-only pauses using monotonic wall time."""
+
+    move_seconds: float
+    pause_seconds: float
+    cycle_started_at: float | None = None
+    move_deadline: float | None = None
+
+    @property
+    def duty_cycle(self) -> float:
+        cycle_seconds = self.move_seconds + self.pause_seconds
+        return self.move_seconds / cycle_seconds
+
+    def reset(self) -> None:
+        self.cycle_started_at = None
+        self.move_deadline = None
+
+    def limit(self, command: DriveCommand, now: float) -> DriveCommand:
+        """Return all-stop during VIEW and the latest plan during MOVE.
+
+        A fresh cycle deliberately starts with the camera-only pause. Positive
+        command changes do not restart the clock, so continually changing
+        steering plans cannot accidentally defeat the configured movement duty.
+        """
+        if not any(command.throttles):
+            self.reset()
+            return command
+        if self.pause_seconds == 0.0:
+            self.move_deadline = None
+            return command
+        if self.cycle_started_at is None or now < self.cycle_started_at:
+            self.cycle_started_at = now
+
+        cycle_seconds = self.move_seconds + self.pause_seconds
+        elapsed = now - self.cycle_started_at
+        cycle_number = int(elapsed // cycle_seconds)
+        cycle_start = self.cycle_started_at + cycle_number * cycle_seconds
+        cycle_position = elapsed % cycle_seconds
+        if cycle_position >= self.pause_seconds:
+            self.move_deadline = cycle_start + cycle_seconds
+            return command
+        self.move_deadline = None
+        return DriveCommand(
+            f"VIEW PAUSE - NEXT {command.name}",
+            (0.0, 0.0, 0.0, 0.0),
+        )
 
 
 def side_command(name: str, right_turn: float, left_turn: float) -> DriveCommand:
@@ -233,22 +392,27 @@ def apply_drive_output(
     command: DriveCommand,
     args: argparse.Namespace,
     course_complete: bool,
-) -> None:
+    move_deadline: float | None = None,
+) -> bool:
     """Apply one command, bypassing all ramps for every all-motor stop."""
     if course_complete or not any(command.throttles):
         drive.stop(immediate=True)
-        return
+        return False
     drive.command(
         command.throttles,
-        # Deceleration is never ramped. This makes the stopped inside motor
+        # Deceleration is never ramped. This makes the stopped opposite-side
         # pair create a real turn instead of continuing to push forward.
         immediate_zero=True,
+        immediate_positive=getattr(args, "creep_pause_seconds", 0.0) > 0.0,
+        stop_deadline=move_deadline,
     )
     drive.step()
+    motion_check = getattr(drive, "motion_is_active", None)
+    return bool(motion_check()) if callable(motion_check) else True
 
 
 def choose_drive_command(navigator: object, frame_width: int, args: argparse.Namespace) -> DriveCommand:
-    """Convert navigator state into conservative differential motor output."""
+    """Turn on a confirmed cone using only the requested physical side."""
     stop = side_command("STOP", 0.0, 0.0)
     target = navigator.current_target
 
@@ -259,8 +423,19 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     if navigator.close_cone_hazard:
         return side_command("STOP - CLOSE CONE", 0.0, 0.0)
 
+    clearance_direction = getattr(
+        navigator,
+        "passed_cone_clearance_direction",
+        None,
+    )
+    clearance = bool(
+        getattr(navigator, "passed_cone_too_close", False)
+        and clearance_direction in {"LEFT", "RIGHT"}
+    )
     # Countersteering and finding the next cone require the newly alternated turn.
-    if navigator.countersteer_remaining > 0 or (
+    if clearance and clearance_direction in {"LEFT", "RIGHT"}:
+        direction = clearance_direction
+    elif navigator.countersteer_remaining > 0 or (
         target is None and navigator.awaiting_new_cone
     ):
         direction = navigator.direction
@@ -269,36 +444,49 @@ def choose_drive_command(navigator: object, frame_width: int, args: argparse.Nam
     elif navigator.phase in {"TURNING", "PASSING"}:
         direction = navigator.direction
     else:
-        x_ratio = target.center[0] / frame_width
-        if x_ratio < 0.44:
-            direction = "LEFT"
-        elif x_ratio > 0.56:
-            direction = "RIGHT"
-        else:
-            if getattr(args, "turn_test_mode", False):
-                return side_command("CENTERED - NO TURN", 0.0, 0.0)
-            return side_command("FORWARD", args.cruise_throttle, args.cruise_throttle)
+        # The navigator requires two matching detection frames before entering
+        # TURNING. Stop during that confirmation frame so an active movement
+        # window cannot add another straight creep toward the cone.
+        if getattr(navigator, "target_detection_frames", 0) > 0:
+            return side_command("STOP - CONFIRM CONE", 0.0, 0.0)
+        if getattr(args, "turn_test_mode", False):
+            return side_command("APPROACH - NO TURN", 0.0, 0.0)
+        return side_command("FORWARD", args.cruise_throttle, args.cruise_throttle)
 
-    hard = (
-        (
-            getattr(navigator.current_target, "cropped", False)
-            or (
-                navigator.smoothed_distance_cm is not None
-                and navigator.smoothed_distance_cm <= args.hard_turn_cm
-            )
-        )
-        and not navigator.clearance_seen
+    # There is deliberately no hard-turn branch. Turning, counterturning, and
+    # searching all use this same low forward-only output on the requested
+    # physical side; the opposite side is stopped and never driven in reverse.
+    opposite_side = (
+        0.0 if getattr(args, "turn_test_mode", False) else args.turn_inside_throttle
     )
-    if getattr(args, "turn_test_mode", False):
-        inside = 0.0
-    elif hard:
-        inside = args.hard_inside_throttle
-    else:
-        inside = args.turn_inside_throttle
-    outside = args.turn_outside_throttle
+    requested_side = args.turn_outside_throttle
+    name = f"CLEAR {direction}" if clearance else direction
     if direction == "RIGHT":
-        return side_command("HARD RIGHT" if hard else "RIGHT", outside, inside)
-    return side_command("HARD LEFT" if hard else "LEFT", inside, outside)
+        return side_command(name, requested_side, opposite_side)
+    return side_command(name, opposite_side, requested_side)
+
+
+def enforce_next_cone_timeout(
+    command: DriveCommand,
+    navigator: object,
+    paused: bool,
+    started_at: float | None,
+    now: float,
+    timeout_seconds: float,
+) -> tuple[DriveCommand, float | None]:
+    """Bound all post-pass searching, including the countersteer interval."""
+    searching = (
+        not paused
+        and bool(getattr(navigator, "awaiting_new_cone", False))
+        and not bool(getattr(navigator, "close_cone_hazard", False))
+    )
+    if not searching:
+        return command, None
+    if started_at is None or now < started_at:
+        started_at = now
+    if now - started_at >= timeout_seconds:
+        return side_command("STOP - NEXT CONE NOT FOUND", 0.0, 0.0), started_at
+    return command, started_at
 
 
 def turn_test_banner(
@@ -315,25 +503,32 @@ def turn_test_banner(
     if paused:
         return (
             "TURN TEST - PAUSED",
-            "LEFT = M3-4  |  RIGHT = M1-2  |  FAR CENTER = ALL STOP",
+            "LEFT = M1-2  |  RIGHT = M3-4  |  UNCONFIRMED = ALL STOP",
             (80, 230, 255),
         )
-    if command.name in {"LEFT", "HARD LEFT"}:
+    if command.name.startswith("VIEW PAUSE - NEXT "):
+        next_command = command.name.removeprefix("VIEW PAUSE - NEXT ")
+        return (
+            "CREEP: CAMERA VIEW PAUSE - ALL STOP",
+            f"NEXT MOTION COMMAND: {next_command}",
+            (80, 230, 255),
+        )
+    if command.name in {"LEFT", "CLEAR LEFT"}:
         return (
             "<<<  TURN TEST: LEFT",
-            "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
+            "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",
             (255, 220, 0),
         )
-    if command.name in {"RIGHT", "HARD RIGHT"}:
+    if command.name in {"RIGHT", "CLEAR RIGHT"}:
         return (
             "TURN TEST: RIGHT  >>>",
-            "COMMANDED: MOTORS 1-2 RUN  |  MOTORS 3-4 STOP",
+            "COMMANDED: MOTORS 3-4 RUN  |  MOTORS 1-2 STOP",
             (0, 165, 255),
         )
-    if command.name == "CENTERED - NO TURN":
+    if command.name == "APPROACH - NO TURN":
         return (
-            "FAR CONE CENTERED - ALL STOP",
-            "MOVE IT LEFT/RIGHT, OR BRING IT CLOSER TO TRIGGER THE PLANNED TURN",
+            "APPROACH PHASE - ALL STOP",
+            "BRING THE CONE TO THE TURN DISTANCE TO TEST THE PLANNED TURN",
             (90, 235, 90),
         )
     if command.name == "FORWARD":
@@ -349,6 +544,7 @@ def draw_autonomous_controls(
     cones_passed: int,
     max_cones: int,
     course_complete: bool,
+    creep_duty_cycle: float,
 ) -> None:
     """Replace the detector-only footer with autonomous drive controls."""
     if turn_test_mode:
@@ -435,19 +631,49 @@ def draw_autonomous_controls(
             "R = RESET   Q/ESC = QUIT"
         )
         footer_color = (90, 235, 90)
-    else:
-        state = "PAUSED" if paused else "DRIVING"
+    elif command.name.startswith("VIEW PAUSE - NEXT "):
+        next_command = command.name.removeprefix("VIEW PAUSE - NEXT ")
         footer = (
-            f"{state} {cones_passed}/{max_cones}   |   G = GO   SPACE/S = STOP   "
-            "R = RESET + STOP   Q/ESC = QUIT"
+            f"AUTO {cones_passed}/{max_cones}   |   CREEP VIEW PAUSE {creep_duty_cycle:.0%}   |   "
+            f"ALL MOTORS STOPPED   |   NEXT: {next_command}   |   S = OPERATOR STOP"
         )
-        footer_color = (80, 230, 255) if paused else (120, 255, 120)
+        footer_color = (80, 230, 255)
+    elif paused:
+        footer = (
+            f"OPERATOR PAUSED {cones_passed}/{max_cones}   |   ALL MOTORS STOPPED   |   "
+            "G = GO   R = RESET   Q/ESC = QUIT"
+        )
+        footer_color = (80, 230, 255)
+    elif not any(command.throttles):
+        footer = (
+            f"AUTO STOP {cones_passed}/{max_cones}   |   ALL MOTORS STOPPED   |   "
+            f"{command.name}   |   S = OPERATOR STOP   R = RESET"
+        )
+        footer_color = (80, 80, 255)
+    else:
+        footer = (
+            f"AUTO MOVE {cones_passed}/{max_cones}   |   CREEP {creep_duty_cycle:.0%}   |   "
+            "SPACE/S = OPERATOR STOP   R = RESET   Q/ESC = QUIT"
+        )
+        footer_color = (120, 255, 120)
+    footer_scale = 0.48
+    footer_width = cv2.getTextSize(
+        footer,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        footer_scale,
+        1,
+    )[0][0]
+    if footer_width > dashboard.shape[1] - 32:
+        footer_scale = max(
+            0.32,
+            footer_scale * (dashboard.shape[1] - 32) / footer_width,
+        )
     cv2.putText(
         dashboard,
         footer,
         (16, 128),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
+        footer_scale,
         footer_color,
         1,
     )
@@ -461,6 +687,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--display-width", type=int, default=1600)
     parser.add_argument("--min-area", type=int, default=450)
+    parser.add_argument(
+        "--robot-width-cm",
+        type=float,
+        default=30.48,
+        help="vehicle width; 30.48 cm is 12 inches",
+    )
+    parser.add_argument(
+        "--camera-from-left-cm",
+        type=float,
+        default=7.62,
+        help="camera center measured from the vehicle's left side; 7.62 cm is 3 inches",
+    )
     parser.add_argument("--hflip", action="store_true")
     parser.add_argument("--vflip", action="store_true")
     parser.add_argument("--warmup-seconds", type=float, default=1.0)
@@ -474,44 +712,93 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "raised-wheel test only: show a large LEFT/RIGHT banner and stop "
-            "the inside motor pair during turns"
+            "the opposite-side motor pair during turns"
         ),
     )
     parser.add_argument("--cone-height-cm", type=float, default=30.5)
     parser.add_argument("--calibration-distance-cm", type=float, default=100.0)
     pi_calibration_file = Path(__file__).with_name("pi_cone_camera_calibration.json")
     parser.add_argument("--calibration-file", type=Path, default=pi_calibration_file)
-    parser.add_argument("--turn-start-cm", type=float, default=130.0)
+    parser.add_argument(
+        "--turn-start-cm",
+        type=float,
+        default=160.0,
+        help="begin the slow slalom turn at this calibrated cone distance",
+    )
     parser.add_argument(
         "--turn-start-height-ratio",
         type=float,
         default=0.30,
         help=(
-            "also begin the planned turn after the cone fills this fraction "
-            "of image height for two frames"
+            "close-cone safety threshold as a fraction of image height; "
+            "normal turns begin after two matching cone detections"
         ),
     )
-    parser.add_argument("--hard-turn-cm", type=float, default=80.0)
+    parser.add_argument(
+        "--hard-turn-cm",
+        type=float,
+        default=80.0,
+        help=(
+            "legacy option name for the close-cone clearance threshold; "
+            "it never increases motor speed"
+        ),
+    )
     parser.add_argument("--pass-distance-cm", type=float, default=60.0)
-    parser.add_argument("--countersteer-frames", type=int, default=32)
+    parser.add_argument(
+        "--countersteer-frames",
+        type=int,
+        default=12,
+        help="applied-motion frames after a pass; camera-view pauses do not count",
+    )
     parser.add_argument(
         "--max-cones",
         type=int,
         default=3,
         help="stop and remain stopped after this many confirmed cone passes",
     )
-    parser.add_argument("--cruise-throttle", type=float, default=0.0001)
-    parser.add_argument("--turn-outside-throttle", type=float, default=0.003)
-    parser.add_argument("--turn-inside-throttle", type=float, default=0.0)
-    parser.add_argument("--hard-inside-throttle", type=float, default=0.0)
+    parser.add_argument("--cruise-throttle", type=float, default=0.003)
+    parser.add_argument(
+        "--turn-side-throttle",
+        "--turn-outside-throttle",
+        dest="turn_outside_throttle",
+        type=float,
+        default=0.015,
+        help=(
+            "forward-only requested-side turn power; the higher default supplies "
+            "enough torque for two motors to drag the stopped opposite wheels"
+        ),
+    )
+    parser.add_argument(
+        "--opposite-side-throttle",
+        "--turn-inside-throttle",
+        dest="turn_inside_throttle",
+        type=float,
+        default=0.0,
+        help="opposite-side power during a turn; zero keeps both wheels stopped",
+    )
     parser.add_argument("--arm-seconds", type=float, default=5.0)
     parser.add_argument("--ramp-step-us", type=int, default=3)
+    parser.add_argument(
+        "--creep-move-seconds",
+        type=float,
+        default=0.20,
+        help="seconds of minimum-pulse movement in each creep cycle",
+    )
+    parser.add_argument(
+        "--creep-pause-seconds",
+        type=float,
+        default=0.30,
+        help="all-stop camera observation time before and between movement bursts",
+    )
     parser.add_argument("--camera-loss-frames", type=int, default=3)
     parser.add_argument(
         "--search-timeout-seconds",
         type=float,
-        default=2.0,
-        help="stop a blind search if the next cone is not found in this time",
+        default=4.0,
+        help=(
+            "wall-clock seconds after a pass to find the next cone, including "
+            "countersteering"
+        ),
     )
     parser.add_argument(
         "--drive",
@@ -524,33 +811,41 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     validate_camera_args(args)
-    for name in ("cruise_throttle", "turn_outside_throttle", "turn_inside_throttle", "hard_inside_throttle"):
+    throttle_options = {
+        "cruise_throttle": "cruise-throttle",
+        "turn_outside_throttle": "turn-side-throttle",
+        "turn_inside_throttle": "opposite-side-throttle",
+    }
+    for name, option in throttle_options.items():
         if not 0.0 <= getattr(args, name) <= 0.25:
-            raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 0.25")
+            raise SystemExit(f"--{option} must be between 0 and 0.25")
     if not (
         args.turn_outside_throttle >= args.cruise_throttle
         and args.turn_outside_throttle > args.turn_inside_throttle
-        and args.hard_inside_throttle <= args.turn_inside_throttle
     ):
         raise SystemExit(
-            "Throttle settings must satisfy: outside >= cruise, outside > inside, "
-            "and hard-inside <= inside"
+            "Throttle settings must satisfy: requested side >= cruise and "
+            "requested side > opposite side"
         )
     if (
         args.ramp_step_us < 1
         or args.camera_loss_frames < 1
         or args.search_timeout_seconds <= 0
         or args.max_cones < 1
+        or args.creep_move_seconds <= 0
     ):
         raise SystemExit(
-            "Ramp step, camera-loss frames, search timeout, and max cones must be positive"
+            "Ramp step, camera-loss frames, search timeout, max cones, and "
+            "creep move time must be positive"
         )
+    if args.creep_pause_seconds < 0:
+        raise SystemExit("Creep pause time cannot be negative")
     if not args.drive:
         raise SystemExit("Refusing to move: rerun with --drive after raising the wheels and checking the kill switch.")
     if args.turn_test_mode and args.headless:
         raise SystemExit("Turn-test mode requires the live dashboard; remove --headless.")
     if args.turn_test_mode and args.turn_outside_throttle <= 0.0:
-        raise SystemExit("Turn-test mode needs --turn-outside-throttle greater than zero.")
+        raise SystemExit("Turn-test mode needs --turn-side-throttle greater than zero.")
 
     drive: FourEscDrive | None = None
     camera = None
@@ -587,11 +882,16 @@ def main() -> None:
         camera = create_camera(args)
         navigator = new_navigator(args)
         preview_navigator = new_preview_navigator(args)
+        motion_gate = MotionPulseGate(
+            move_seconds=args.creep_move_seconds,
+            pause_seconds=args.creep_pause_seconds,
+        )
         lost_frames = 0
-        blind_search_started_at: float | None = None
+        next_cone_search_started_at: float | None = None
         previous_status = ""
         paused = not args.headless
         has_started = args.headless
+        motion_applied_last_frame = False
         print(f"Autonomous slalom camera active using {camera.name}.")
         if args.headless:
             print("Headless autonomy starts immediately. Ctrl+C stops all motors.")
@@ -604,12 +904,30 @@ def main() -> None:
         print(
             "Minimum-speed pulses: "
             f"forward {FourEscDrive._pulse_for_throttle(0, args.cruise_throttle)} us, "
-            f"turn outside {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
-            f"turn inside {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
+            f"turn side {FourEscDrive._pulse_for_throttle(0, args.turn_outside_throttle)} us, "
+            f"opposite side {FourEscDrive._pulse_for_throttle(0, args.turn_inside_throttle)} us."
+        )
+        camera_offset_cm = args.camera_from_left_cm - args.robot_width_cm / 2.0
+        if camera_offset_cm < 0.0:
+            camera_position = f"{abs(camera_offset_cm):.2f} cm left of vehicle center"
+        elif camera_offset_cm > 0.0:
+            camera_position = f"{camera_offset_cm:.2f} cm right of vehicle center"
+        else:
+            camera_position = "on the vehicle centerline"
+        print(
+            f"Camera geometry: {args.robot_width_cm:.2f} cm robot width, camera "
+            f"{args.camera_from_left_cm:.2f} cm from the left "
+            f"({camera_position})."
+        )
+        print(
+            f"Creep starts with {args.creep_pause_seconds:.2f} s ALL-STOP CAMERA VIEW, "
+            f"then alternates {args.creep_move_seconds:.2f} s MOVE / "
+            f"{args.creep_pause_seconds:.2f} s VIEW "
+            f"({motion_gate.duty_cycle:.0%} movement duty)."
         )
         if args.turn_test_mode:
             print(
-                "TURN TEST MODE: LEFT runs motors 3-4, RIGHT runs motors 1-2, "
+                "TURN TEST MODE: LEFT runs motors 1-2, RIGHT runs motors 3-4, "
                 "and the opposite pair stops. Raised wheels only."
             )
 
@@ -619,6 +937,8 @@ def main() -> None:
                 lost_frames += 1
                 # Do not coast on the last vision command while retrying the camera.
                 drive.stop(immediate=True)
+                motion_gate.reset()
+                motion_applied_last_frame = False
                 if lost_frames >= args.camera_loss_frames:
                     raise RuntimeError("Camera frames lost; motors stopped")
                 continue
@@ -634,7 +954,14 @@ def main() -> None:
             if course_complete:
                 feedback = course_complete_feedback(args)
             else:
-                feedback = view_navigator.update(detections, calibration, frame.shape)
+                feedback = view_navigator.update(
+                    detections,
+                    calibration,
+                    frame.shape,
+                    motion_applied=(
+                        motion_applied_last_frame if not paused else False
+                    ),
+                )
                 if paused:
                     # Preview tracking may react to cones moved by hand, but it
                     # must never display progress or direction from a run that
@@ -645,33 +972,37 @@ def main() -> None:
                     feedback = course_complete_feedback(args)
             if course_complete:
                 command = side_command("COURSE COMPLETE", 0.0, 0.0)
-                blind_search_started_at = None
+                next_cone_search_started_at = None
             else:
                 command = choose_drive_command(view_navigator, frame.shape[1], args)
-                blind_searching = (
-                    not paused
-                    and view_navigator.current_target is None
-                    and view_navigator.awaiting_new_cone
-                    and view_navigator.countersteer_remaining == 0
-                    and not view_navigator.close_cone_hazard
+                command, next_cone_search_started_at = enforce_next_cone_timeout(
+                    command,
+                    view_navigator,
+                    paused,
+                    next_cone_search_started_at,
+                    time.monotonic(),
+                    args.search_timeout_seconds,
                 )
-                if blind_searching:
-                    if blind_search_started_at is None:
-                        blind_search_started_at = time.monotonic()
-                    if (
-                        time.monotonic() - blind_search_started_at
-                        >= args.search_timeout_seconds
-                    ):
-                        command = side_command("STOP - NEXT CONE NOT FOUND", 0.0, 0.0)
-                else:
-                    blind_search_started_at = None
 
                 if paused:
                     command = side_command("PAUSED", 0.0, 0.0)
 
-            apply_drive_output(drive, command, args, course_complete)
+            planned_command = command
+            command = motion_gate.limit(planned_command, time.monotonic())
+            motion_applied_last_frame = apply_drive_output(
+                drive,
+                command,
+                args,
+                course_complete,
+                move_deadline=motion_gate.move_deadline,
+            )
+            if any(command.throttles) and not motion_applied_last_frame:
+                command = DriveCommand(
+                    f"VIEW PAUSE - NEXT {planned_command.name}",
+                    (0.0, 0.0, 0.0, 0.0),
+                )
 
-            status = f"{command.name}: {feedback}"
+            status = f"NAV PLAN {planned_command.name}: {feedback}"
             if status != previous_status:
                 print(status)
                 previous_status = status
@@ -688,6 +1019,12 @@ def main() -> None:
                     )
                 elif paused:
                     visual_feedback = "PAUSED - PRESS G TO START AUTONOMOUS DRIVE"
+                elif command.name.startswith("VIEW PAUSE - NEXT "):
+                    next_command = command.name.removeprefix("VIEW PAUSE - NEXT ")
+                    visual_feedback = (
+                        f"ALL MOTORS STOPPED - CAMERA VIEW | NEXT: {next_command} | "
+                        f"CONES {view_navigator.cones_passed}/{args.max_cones} | {feedback}"
+                    )
                 else:
                     visual_feedback = (
                         f"MOTORS {command.name} | CONES "
@@ -712,6 +1049,7 @@ def main() -> None:
                     navigator.cones_passed,
                     args.max_cones,
                     course_complete,
+                    motion_gate.duty_cycle,
                 )
                 cv2.imshow(WINDOW_NAME, dashboard)
 
@@ -739,25 +1077,31 @@ def main() -> None:
                 if key in (ord(" "), ord("s"), ord("S")):
                     paused = True
                     preview_navigator = new_preview_navigator(args)
-                    blind_search_started_at = None
+                    next_cone_search_started_at = None
                     drive.stop(immediate=True)
+                    motion_gate.reset()
+                    motion_applied_last_frame = False
                 elif key in (ord("g"), ord("G")):
                     if course_complete:
                         # Completion is latched. Only R may start a new course.
                         drive.stop(immediate=True)
+                        motion_gate.reset()
+                        motion_applied_last_frame = False
                     else:
                         if not has_started:
                             navigator = new_navigator(args)
                             has_started = True
-                        blind_search_started_at = None
+                        next_cone_search_started_at = None
                         paused = False
                 elif key in (ord("r"), ord("R")):
                     navigator = new_navigator(args)
                     preview_navigator = new_preview_navigator(args)
                     has_started = False
-                    blind_search_started_at = None
+                    next_cone_search_started_at = None
                     paused = True
                     drive.stop(immediate=True)
+                    motion_gate.reset()
+                    motion_applied_last_frame = False
     except KeyboardInterrupt:
         print("Stopped by operator.")
     finally:
